@@ -172,14 +172,14 @@ fn cmd_remote(command: &RemoteCommands) -> Result<()> {
         }
         RemoteCommands::SetPrimary { name } => {
             let mut repo = GitRepo::open()?;
-            repo.config.set_primary_remote(&name)?;
+            repo.config.set_primary_remote(name)?;
             repo.config.save(&repo.repo)?;
             println!("Primary remote set to '{}'", style(name).green());
             Ok(())
         }
         RemoteCommands::Show { name } => {
             let repo = GitRepo::open()?;
-            let remote = repo.repo.find_remote(&name)?;
+            let remote = repo.repo.find_remote(name)?;
 
             println!("Remote: {}", style(name).cyan().bold());
             println!("URL: {}", remote.url().unwrap_or("unknown"));
@@ -189,7 +189,7 @@ fn cmd_remote(command: &RemoteCommands) -> Result<()> {
             }
 
             // Show config details
-            if let Ok(config) = repo.config.get_remote(&name) {
+            if let Ok(config) = repo.config.get_remote(name) {
                 println!("Is Primary: {}", config.is_primary);
             }
             if let Some((name, _)) = repo.config.get_primary_remote() {

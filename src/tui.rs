@@ -1,6 +1,6 @@
 use crossterm::event::{self, Event, KeyCode};
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Layout},
     style::{Color, Style},
     widgets::{Block, Borders, Paragraph},
     Frame,
@@ -19,7 +19,7 @@ pub fn run_tui() -> io::Result<()> {
     let mut should_quit = false;
 
     while !should_quit {
-        terminal.draw(|f| ui(f))?;
+        terminal.draw(ui)?;
         should_quit = handle_events()?;
     }
 

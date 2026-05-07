@@ -19,6 +19,12 @@ cargo install --path .
 
 ## Usage
 
+### GUI Mode
+Launch the terminal user interface:
+```bash
+git-multi --gui
+```
+
 ### Initialization
 
 Initialize `git-multi` in your current Git repository:
@@ -33,11 +39,17 @@ git-multi init
 # Add a new remote
 git-multi remote add upstream https://github.com/user/repo.git
 
+# List all configured remote names
+git-multi remote list-names
+
+# Set a default remote
+git-multi remote set-default upstream
+
+# Set a primary remote
+git-multi remote set-primary upstream
+
 # List all remotes
 git-multi remote list --urls
-
-# Show details of a specific remote
-git-multi remote show upstream
 ```
 
 ### Branch Management

@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod error;
 mod git;
+mod tui;
 
 use cli::*;
 use error::*;
@@ -15,6 +16,14 @@ use tracing::{info, warn};
 
 fn main() {
     let cli = Cli::parse();
+    
+    if cli.gui {
+        if let Err(e) = tui::run_tui() {
+            eprintln!("TUI error: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
     
     // Initialize tracing
     let filter = match cli.verbose {
@@ -35,25 +44,30 @@ fn main() {
 }
 
 fn run(cli: &Cli) -> Result<()> {
-    match &cli.command {
-        Commands::Init => cmd_init(),
-        Commands::Remote { command } => cmd_remote(command),
-        Commands::Branch { command } => cmd_branch(command),
-        Commands::Fetch { all, remote } => cmd_fetch(*all, remote.clone()),
-        Commands::Pull { all, remote, branch } => cmd_pull(*all, remote.clone(), branch.clone()),
-        Commands::Push { all, remote, branch, force } => cmd_push(*all, remote.clone(), branch.clone(), *force),
-        Commands::Checkout { branch, remote, new } => cmd_checkout(branch.clone(), remote.clone(), *new),
-        Commands::Sync { from_remote, to_remote, from_branch, to_branch, commits, strategy, force } => {
-            cmd_sync(from_remote.clone(), to_remote.clone(), from_branch.clone(), to_branch.clone(), 
-                   commits.clone(), *strategy, *force)
+    if let Some(command) = &cli.command {
+        match command {
+            Commands::Init => cmd_init(),
+            Commands::Remote { command } => cmd_remote(command),
+            Commands::Branch { command } => cmd_branch(command),
+            Commands::Fetch { all, remote } => cmd_fetch(*all, remote.clone()),
+            Commands::Pull { all, remote, branch } => cmd_pull(*all, remote.clone(), branch.clone()),
+            Commands::Push { all, remote, branch, force } => cmd_push(*all, remote.clone(), branch.clone(), *force),
+            Commands::Checkout { branch, remote, new } => cmd_checkout(branch.clone(), remote.clone(), *new),
+            Commands::Sync { from_remote, to_remote, from_branch, to_branch, commits, strategy, force } => {
+                cmd_sync(from_remote.clone(), to_remote.clone(), from_branch.clone(), to_branch.clone(), 
+                       commits.clone(), *strategy, *force)
+            }
+            Commands::Copy { from, to, files, prune } => cmd_copy(from.clone(), to.clone(), files.clone(), *prune),
+            Commands::Pr { remote, base, head, title, description, open } => {
+                cmd_pr(remote.clone(), base.clone(), head.clone(), title.clone(), description.clone(), *open)
+            }
+            Commands::Use { remote } => cmd_use(remote.clone()),
+            Commands::Status => cmd_status(),
+            Commands::List => cmd_list(),
         }
-        Commands::Copy { from, to, files, prune } => cmd_copy(from.clone(), to.clone(), files.clone(), *prune),
-        Commands::Pr { remote, base, head, title, description, open } => {
-            cmd_pr(remote.clone(), base.clone(), head.clone(), title.clone(), description.clone(), *open)
-        }
-        Commands::Use { remote } => cmd_use(remote.clone()),
-        Commands::Status => cmd_status(),
-        Commands::List => cmd_list(),
+    } else {
+        println!("No command specified. Use --help for usage.");
+        Ok(())
     }
 }
 

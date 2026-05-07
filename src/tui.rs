@@ -1,65 +1,85 @@
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::{
-    layout::{Alignment, Constraint, Layout},
+    layout::{Constraint, Direction, Layout},
     style::{Color, Style},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Frame,
 };
 use std::io;
 
 // Custom Palette
 const VIBRANT_PINK: Color = Color::Rgb(255, 105, 180);
-const MAUVE: Color = Color::Rgb(224, 176, 255);
 const CYAN: Color = Color::Rgb(0, 255, 255);
 const CREAM: Color = Color::Rgb(255, 253, 208);
 const RED: Color = Color::Rgb(255, 69, 58);
+const MAUVE: Color = Color::Rgb(224, 176, 255);
+
+struct AppState {
+    items: Vec<String>,
+    list_state: ListState,
+}
 
 pub fn run_tui() -> io::Result<()> {
     let mut terminal = ratatui::init();
-    let mut should_quit = false;
+    let mut state = AppState {
+        items: vec!["Remotes".to_string(), "Branches".to_string(), "Status".to_string()],
+        list_state: ListState::default(),
+    };
+    state.list_state.select(Some(0));
 
-    while !should_quit {
-        terminal.draw(ui)?;
-        should_quit = handle_events()?;
+    loop {
+        terminal.draw(|f| ui(f, &mut state))?;
+        if handle_events(&mut state)? {
+            break;
+        }
     }
 
     ratatui::restore();
     Ok(())
 }
 
-fn ui(f: &mut Frame) {
-    let area = f.area();
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(VIBRANT_PINK))
-        .title(" git-multi TUI ")
-        .title_style(Style::default().fg(CYAN).bold());
-
+fn ui(f: &mut Frame, state: &mut AppState) {
     let layout = Layout::default()
-        .direction(ratatui::layout::Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(80),
-            Constraint::Percentage(20),
-        ])
-        .split(area);
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+        .split(f.area());
 
-    let main_content = Paragraph::new("Welcome to git-multi!\n\nStatus: [Operational]\n\nPress 'q' to quit.")
-        .style(Style::default().fg(CREAM))
-        .alignment(Alignment::Center)
-        .block(block);
-    f.render_widget(main_content, layout[0]);
+    // Sidebar
+    let items: Vec<ListItem> = state.items.iter().map(|i| ListItem::new(i.as_str())).collect();
+    let list = List::new(items)
+        .block(Block::default().title(" Navigation ").borders(Borders::ALL).border_style(Style::default().fg(VIBRANT_PINK)))
+        .highlight_style(Style::default().bg(CYAN).fg(Color::Black))
+        .highlight_symbol(">> ");
+    f.render_stateful_widget(list, layout[0], &mut state.list_state);
 
-    let footer = Paragraph::new("System Status: All systems stable.")
-        .style(Style::default().fg(MAUVE))
-        .alignment(Alignment::Center)
-        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(RED)));
-    f.render_widget(footer, layout[1]);
+    // Main Content
+    let content = match state.list_state.selected() {
+        Some(0) => "Manage your remotes here.",
+        Some(1) => "View and manage your branches here.",
+        _ => "System status overview.",
+    };
+    let main_view = Paragraph::new(content)
+        .block(Block::default().title(" Details ").borders(Borders::ALL).border_style(Style::default().fg(MAUVE)))
+        .style(Style::default().fg(CREAM));
+    f.render_widget(main_view, layout[1]);
 }
-fn handle_events() -> io::Result<bool> {
+
+fn handle_events(state: &mut AppState) -> io::Result<bool> {
     if event::poll(std::time::Duration::from_millis(100))? {
         if let Event::Key(key) = event::read()? {
-            if key.kind == event::KeyEventKind::Press && key.code == KeyCode::Char('q') {
-                return Ok(true);
+            if key.kind == KeyEventKind::Press {
+                match key.code {
+                    KeyCode::Char('q') => return Ok(true),
+                    KeyCode::Down => {
+                        let i = state.list_state.selected().map(|i| (i + 1) % state.items.len());
+                        state.list_state.select(i);
+                    }
+                    KeyCode::Up => {
+                        let i = state.list_state.selected().map(|i| if i == 0 { state.items.len() - 1 } else { i - 1 });
+                        state.list_state.select(i);
+                    }
+                    _ => {}
+                }
             }
         }
     }

@@ -1,5 +1,4 @@
 use clap::{Parser, Subcommand, ValueEnum};
-use std::path::PathBuf;
 
 /// Git Multi-Remote CLI
 /// Manage multiple Git remotes and sync content between them
@@ -233,6 +232,23 @@ pub enum RemoteCommands {
 
     /// Show remote details
     Show {
+        /// Remote name
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+
+    /// List all configured remote names
+    ListNames {},
+    
+    /// Set default remote
+    SetDefault {
+        /// Remote name
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+
+    /// Set primary remote
+    SetPrimary {
         /// Remote name
         #[arg(value_name = "NAME")]
         name: String,

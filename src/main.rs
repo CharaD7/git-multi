@@ -4,15 +4,14 @@ mod error;
 mod git;
 
 use cli::*;
-use config::*;
 use error::*;
 use git::*;
 
 use clap::Parser;
 use console::style;
-use dialoguer::{Confirm, Input};
+use dialoguer::Confirm;
 use std::process;
-use tracing::{debug, error, info, warn};
+use tracing::{info, warn};
 
 fn main() {
     let cli = Cli::parse();
@@ -150,23 +149,51 @@ fn cmd_remote(command: &RemoteCommands) -> Result<()> {
             println!("Renamed remote '{}' to '{}'", old_name, style(new_name).green());
             Ok(())
         }
+        RemoteCommands::SetDefault { name } => {
+            let mut repo = GitRepo::open()?;
+            repo.config.set_default_remote(name.clone())?;
+            repo.config.save(&repo.repo)?;
+            println!("Default remote set to '{}'", style(name).green());
+            Ok(())
+        }
+        RemoteCommands::SetPrimary { name } => {
+            let mut repo = GitRepo::open()?;
+            repo.config.set_primary_remote(&name)?;
+            repo.config.save(&repo.repo)?;
+            println!("Primary remote set to '{}'", style(name).green());
+            Ok(())
+        }
         RemoteCommands::Show { name } => {
             let repo = GitRepo::open()?;
-            let remote = repo.repo.find_remote(name)?;
-            
+            let remote = repo.repo.find_remote(&name)?;
+
             println!("Remote: {}", style(name).cyan().bold());
             println!("URL: {}", remote.url().unwrap_or("unknown"));
-            
+
             if let Some(push_url) = remote.pushurl() {
                 println!("Push URL: {}", push_url);
             }
-            
-            let branches = repo.list_remote_branches(name)?;
+
+            // Show config details
+            if let Ok(config) = repo.config.get_remote(&name) {
+                println!("Is Primary: {}", config.is_primary);
+            }
+            if let Some((name, _)) = repo.config.get_primary_remote() {
+                println!("Primary Remote: {}", name);
+            }
+
+            let branches = repo.list_remote_branches(&name)?;
             println!("\nBranches:");
             for branch in branches {
-                println!("  {}", style(&branch).green());
+                println!("  {}", branch);
             }
-            
+            Ok(())
+        }
+        RemoteCommands::ListNames {} => {
+            let repo = GitRepo::open()?;
+            for name in repo.config.get_remote_names() {
+                println!("{}", name);
+            }
             Ok(())
         }
     }
@@ -251,7 +278,7 @@ fn cmd_branch(command: &BranchCommands) -> Result<()> {
             // Create on remotes
             if let Some(remote_names) = remotes {
                 for remote_name in remote_names {
-                    let mut remote = repo.repo.find_remote(&remote_name)?;
+                    let mut remote = repo.repo.find_remote(remote_name)?;
                     let refspec = format!("refs/heads/{}:refs/heads/{}", branch, branch);
                     remote.push(&[&refspec], None)?;
                     println!("Created branch '{}' on remote '{}'", style(branch).green(), style(&remote_name).cyan());

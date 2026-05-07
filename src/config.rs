@@ -2,8 +2,7 @@ use crate::error::{GitMultiError, Result};
 use git2::Repository;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::{self, File};
-use std::path::Path;
+use std::fs::{self};
 
 const CONFIG_DIR: &str = ".gitmulti";
 const CONFIG_FILE: &str = "config.toml";
@@ -71,7 +70,7 @@ impl Config {
 
         let config_content = fs::read_to_string(&config_path)?;
         let config: Config = toml::from_str(&config_content)
-            .map_err(|e| GitMultiError::TomlDeserializeError(e))?;
+            .map_err(GitMultiError::TomlDeserializeError)?;
 
         Ok(config)
     }
@@ -86,7 +85,7 @@ impl Config {
         }
 
         let config_content = toml::to_string(self)
-            .map_err(|e| GitMultiError::TomlSerializeError(e))?;
+            .map_err(GitMultiError::TomlSerializeError)?;
         
         fs::write(&config_path, config_content)?;
         
@@ -189,7 +188,6 @@ impl Config {
     pub fn get_primary_remote(&self) -> Option<(&String, &RemoteConfig)> {
         self.remotes.iter()
             .find(|(_, config)| config.is_primary)
-            .map(|(name, config)| (name, config))
     }
 }
 

@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+#[allow(dead_code)]
 pub enum GitMultiError {
     #[error("Git error: {0}")]
     GitError(#[from] git2::Error),

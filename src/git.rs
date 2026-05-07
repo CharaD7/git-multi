@@ -1,6 +1,6 @@
-use crate::config::{Config, RemoteConfig};
+use crate::config::Config;
 use crate::error::{GitMultiError, Result};
-use git2::{BranchType, FetchOptions, PushOptions, Reference, Remote, Repository, ResetType};
+use git2::{BranchType, FetchOptions, PushOptions, Remote, Repository};
 use std::collections::HashMap;
 use std::fs;
 use std::process::Command;
@@ -11,6 +11,7 @@ pub struct GitRepo {
     pub config: Config,
 }
 
+#[allow(dead_code)]
 impl GitRepo {
     /// Open a git repository in the current directory
     pub fn open() -> Result<Self> {
@@ -58,7 +59,7 @@ impl GitRepo {
     }
 
     /// Get a git2 Remote object
-    pub fn get_remote(&self, name: &str) -> Result<Remote> {
+    pub fn get_remote(&self, name: &str) -> Result<Remote<'_>> {
         self.repo.find_remote(name)
             .map_err(|_| GitMultiError::RemoteNotFound(name.to_string()))
     }
@@ -160,7 +161,7 @@ impl GitRepo {
         // Remote branches
         let remote_names = self.repo.remotes()?;
         for remote_name in remote_names.iter().flatten() {
-            let remote = self.repo.find_remote(remote_name)?;
+            let _remote = self.repo.find_remote(remote_name)?;
             // Note: We should fetch or use cached remote branches from refs/remotes/
             let remote_ref_prefix = format!("refs/remotes/{}/", remote_name);
             for reference in self.repo.references()? {
@@ -208,7 +209,7 @@ impl GitRepo {
     }
 
     /// Get current HEAD commit
-    pub fn head_commit(&self) -> Result<git2::Commit> {
+    pub fn head_commit(&self) -> Result<git2::Commit<'_>> {
         let head = self.repo.head()?;
         let commit = head.peel_to_commit()?;
         Ok(commit)
@@ -319,9 +320,9 @@ impl GitRepo {
         
         // Try as branch name
         if let Ok(ref_obj) = self.repo.find_reference(spec) {
-            return Ok(ref_obj.target().ok_or_else(|| {
+            return ref_obj.target().ok_or_else(|| {
                 GitMultiError::SyncError(format!("Reference {} has no target", spec))
-            })?);
+            });
         }
         
         // Try relative ref (HEAD~, HEAD^, etc.)
@@ -495,7 +496,7 @@ impl GitRepo {
         description: Option<&str>,
     ) -> Result<()> {
         let status = Command::new("gh")
-            .args(&["pr", "create"])
+            .args(["pr", "create"])
             .arg("--repo").arg(remote_name)
             .arg("--base").arg(base_branch)
             .arg("--head").arg(head_branch)
@@ -542,4 +543,3 @@ impl std::fmt::Display for BranchInfo {
 }
 
 // Re-export git2 types for convenience
-pub use git2::{Repository as GitRepository, Oid as GitOid};

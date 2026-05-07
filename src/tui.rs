@@ -1,6 +1,6 @@
 use crossterm::event::{self, Event, KeyCode};
 use ratatui::{
-    layout::Alignment,
+    layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Style},
     widgets::{Block, Borders, Paragraph},
     Frame,
@@ -35,14 +35,26 @@ fn ui(f: &mut Frame) {
         .title(" git-multi TUI ")
         .title_style(Style::default().fg(CYAN).bold());
 
-    let text = Paragraph::new("Welcome to git-multi!\n\nPress 'q' to quit.")
+    let layout = Layout::default()
+        .direction(ratatui::layout::Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(80),
+            Constraint::Percentage(20),
+        ])
+        .split(area);
+
+    let main_content = Paragraph::new("Welcome to git-multi!\n\nStatus: [Operational]\n\nPress 'q' to quit.")
         .style(Style::default().fg(CREAM))
         .alignment(Alignment::Center)
         .block(block);
+    f.render_widget(main_content, layout[0]);
 
-    f.render_widget(text, area);
+    let footer = Paragraph::new("System Status: All systems stable.")
+        .style(Style::default().fg(MAUVE))
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(RED)));
+    f.render_widget(footer, layout[1]);
 }
-
 fn handle_events() -> io::Result<bool> {
     if event::poll(std::time::Duration::from_millis(100))? {
         if let Event::Key(key) = event::read()? {

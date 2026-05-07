@@ -54,9 +54,9 @@ fn ui(f: &mut Frame, state: &mut AppState) {
 
     // Main Content
     let content = match state.list_state.selected() {
-        Some(0) => "Manage your remotes here.",
-        Some(1) => "View and manage your branches here.",
-        _ => "System status overview.",
+        Some(0) => "Remote Management\n\n- Add/Remove remotes\n- List remotes\n- Sync remotes",
+        Some(1) => "Branch Management\n\n- Create/Delete branches\n- List branches\n- Checkout branches",
+        _ => "System Status\n\nAll systems are stable and operational.",
     };
     let main_view = Paragraph::new(content)
         .block(Block::default().title(" Details ").borders(Borders::ALL).border_style(Style::default().fg(MAUVE)))

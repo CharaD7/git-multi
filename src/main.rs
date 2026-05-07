@@ -196,7 +196,7 @@ fn cmd_remote(command: &RemoteCommands) -> Result<()> {
                 println!("Primary Remote: {}", name);
             }
 
-            let branches = repo.list_remote_branches(&name)?;
+            let branches = repo.list_remote_branches(name)?;
             println!("\nBranches:");
             for branch in branches {
                 println!("  {}", branch);

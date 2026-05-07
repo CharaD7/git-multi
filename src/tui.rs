@@ -35,7 +35,13 @@ struct AppState {
 impl AppState {
     fn new() -> Self {
         Self {
-            items: vec!["Remotes".to_string(), "Branches".to_string(), "Status".to_string()],
+            items: vec![
+                "Remotes".to_string(), 
+                "Branches".to_string(), 
+                "Status".to_string(),
+                "Fetch".to_string(),
+                "Push".to_string()
+            ],
             list_state: ListState::default(),
             overlay: Overlay::None,
             repo: GitRepo::open().ok(),
@@ -83,9 +89,12 @@ fn ui(f: &mut Frame, state: &mut AppState) {
 
     // Main Content
     let content = match state.list_state.selected() {
-        Some(0) => "Remote Management\n\n- [f] Fetch all\n- [p] Push all",
-        Some(1) => "Branch Management\n\n- [n] Create new branch\n- [d] Delete selected branch",
-        _ => "System Status\n\nAll systems are stable.",
+        Some(0) => "Remote Management\n\n- Add/Rename/List remotes",
+        Some(1) => "Branch Management\n\n- [n] Create branch\n- [d] Delete branch",
+        Some(2) => "System Status\n\nAll systems are stable.",
+        Some(3) => "Fetch Action\n\nPress [Enter] to fetch from all remotes.",
+        Some(4) => "Push Action\n\nPress [Enter] to push to all remotes.",
+        _ => "Select an action.",
     };
     let main_view = Paragraph::new(content)
         .block(Block::default().title(" Details ").borders(Borders::ALL).border_style(Style::default().fg(MAUVE)))
@@ -189,12 +198,24 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                         let i = state.list_state.selected().map(|i| if i == 0 { state.items.len() - 1 } else { i - 1 });
                         state.list_state.select(i);
                     }
-                    KeyCode::Char('f') => {
-                        if let Some(repo) = &state.repo {
-                            if repo.fetch_all().is_ok() {
-                                state.overlay = Overlay::Message { text: "Fetched all remotes!".to_string(), is_error: false };
-                            } else {
-                                state.overlay = Overlay::Message { text: "Fetch failed!".to_string(), is_error: true };
+                    KeyCode::Enter => {
+                        if let Some(i) = state.list_state.selected() {
+                            match i {
+                                3 => { /* Fetch */ 
+                                    if let Some(repo) = &state.repo {
+                                        if repo.fetch_all().is_ok() {
+                                            state.overlay = Overlay::Message { text: "Fetched!".to_string(), is_error: false };
+                                        }
+                                    }
+                                }
+                                4 => { /* Push */
+                                    if let Some(repo) = &state.repo {
+                                        if repo.push_to_all(None).is_ok() {
+                                            state.overlay = Overlay::Message { text: "Pushed!".to_string(), is_error: false };
+                                        }
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }

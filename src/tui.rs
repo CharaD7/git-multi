@@ -14,16 +14,26 @@ const CREAM: Color = Color::Rgb(255, 253, 208);
 const RED: Color = Color::Rgb(255, 69, 58);
 const MAUVE: Color = Color::Rgb(224, 176, 255);
 
+enum Overlay {
+    None,
+    Input { prompt: String, value: String },
+}
+
 struct AppState {
     items: Vec<String>,
     list_state: ListState,
+    overlay: Overlay,
 }
+
+// ... update run_tui and ui logic to handle overlay ...
+// (I will continue with this in subsequent steps)
 
 pub fn run_tui() -> io::Result<()> {
     let mut terminal = ratatui::init();
     let mut state = AppState {
         items: vec!["Remotes".to_string(), "Branches".to_string(), "Status".to_string()],
         list_state: ListState::default(),
+        overlay: Overlay::None,
     };
     state.list_state.select(Some(0));
 
@@ -74,6 +84,34 @@ fn ui(f: &mut Frame, state: &mut AppState) {
         .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(CYAN)))
         .style(Style::default().fg(CREAM).bg(Color::Rgb(50, 50, 50)));
     f.render_widget(footer, layout[1]);
+
+    // Render Overlay if active
+    if let Overlay::Input { prompt, value } = &state.overlay {
+        let area = centered_rect(50, 3, f.area());
+        let modal = Paragraph::new(format!("{}\n{}", prompt, value))
+            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(RED)));
+        f.render_widget(ratatui::widgets::Clear, area);
+        f.render_widget(modal, area);
+    }
+}
+
+fn centered_rect(percent_x: u16, height: u16, r: ratatui::layout::Rect) -> ratatui::layout::Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(50),
+            Constraint::Length(height),
+            Constraint::Percentage(50),
+        ])
+        .split(r);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }
 
 fn handle_events(state: &mut AppState) -> io::Result<bool> {

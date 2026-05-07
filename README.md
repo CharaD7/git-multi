@@ -46,8 +46,11 @@ git-multi remote show upstream
 # List all local and remote branches
 git-multi branch list --all
 
-# Create a new branch from a base
+# Create a new branch locally
 git-multi branch create feature-branch --base main --checkout
+
+# Create a new branch locally and on multiple remotes
+git-multi branch create feat/uat --remotes origin upstream backup --checkout
 ```
 
 ### Syncing and Moving Content

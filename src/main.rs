@@ -238,14 +238,25 @@ fn cmd_branch(command: &BranchCommands) -> Result<()> {
             }
             Ok(())
         }
-        BranchCommands::Create { branch, base, checkout } => {
+        BranchCommands::Create { branch, base, remotes, checkout } => {
             let repo = GitRepo::open()?;
             
             let base_oid = repo.resolve_commit_spec(base)?;
             let base_commit = repo.repo.find_commit(base_oid)?;
-            repo.repo.branch(branch, &base_commit, false)?;
             
-            println!("Created branch '{}' from '{}'", style(branch).green(), base);
+            // Create local branch
+            repo.repo.branch(branch, &base_commit, false)?;
+            println!("Created local branch '{}' from '{}'", style(branch).green(), base);
+            
+            // Create on remotes
+            if let Some(remote_names) = remotes {
+                for remote_name in remote_names {
+                    let mut remote = repo.repo.find_remote(&remote_name)?;
+                    let refspec = format!("refs/heads/{}:refs/heads/{}", branch, branch);
+                    remote.push(&[&refspec], None)?;
+                    println!("Created branch '{}' on remote '{}'", style(branch).green(), style(&remote_name).cyan());
+                }
+            }
             
             if *checkout {
                 repo.checkout_branch(branch)?;

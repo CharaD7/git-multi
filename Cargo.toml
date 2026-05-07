@@ -1,0 +1,34 @@
+[package]
+name = "git-multi"
+version = "0.1.0"
+edition = "2021"
+authors = ["CharaD7 <jijakahn6@gmail.com>"]
+description = "A CLI tool for managing multiple Git remotes and syncing content between them"
+license = "MIT"
+readme = "README.md"
+keywords = ["git", "cli", "remote", "sync", "multi-remote"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+git2 = "0.20.4"
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+toml = "1.1.2+spec-1.1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dialoguer = "0.12.0"
+console = "0.16.3"
+pathdiff = "0.2"
+thiserror = "2.0.18"
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.0"
+tempfile = "3.8"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true

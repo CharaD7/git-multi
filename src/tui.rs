@@ -7,6 +7,8 @@ use ratatui::{
 };
 use std::io;
 
+use crate::git::GitRepo;
+
 // Custom Palette
 const VIBRANT_PINK: Color = Color::Rgb(255, 105, 180);
 const CYAN: Color = Color::Rgb(0, 255, 255);
@@ -14,15 +16,31 @@ const CREAM: Color = Color::Rgb(255, 253, 208);
 const RED: Color = Color::Rgb(255, 69, 58);
 const MAUVE: Color = Color::Rgb(224, 176, 255);
 
+#[derive(Default)]
 enum Overlay {
+    #[default]
     None,
-    Input { prompt: String, value: String },
+    Input { prompt: String, value: String, action: String },
+    Confirm { question: String, action: String },
+    Message { text: String, is_error: bool },
 }
 
 struct AppState {
     items: Vec<String>,
     list_state: ListState,
     overlay: Overlay,
+    repo: Option<GitRepo>,
+}
+
+impl AppState {
+    fn new() -> Self {
+        Self {
+            items: vec!["Remotes".to_string(), "Branches".to_string(), "Status".to_string()],
+            list_state: ListState::default(),
+            overlay: Overlay::None,
+            repo: GitRepo::open().ok(),
+        }
+    }
 }
 
 // ... update run_tui and ui logic to handle overlay ...
@@ -30,11 +48,7 @@ struct AppState {
 
 pub fn run_tui() -> io::Result<()> {
     let mut terminal = ratatui::init();
-    let mut state = AppState {
-        items: vec!["Remotes".to_string(), "Branches".to_string(), "Status".to_string()],
-        list_state: ListState::default(),
-        overlay: Overlay::None,
-    };
+    let mut state = AppState::new();
     state.list_state.select(Some(0));
 
     loop {
@@ -86,7 +100,7 @@ fn ui(f: &mut Frame, state: &mut AppState) {
     f.render_widget(footer, layout[1]);
 
     // Render Overlay if active
-    if let Overlay::Input { prompt, value } = &state.overlay {
+    if let Overlay::Input { prompt, value, .. } = &state.overlay {
         let area = centered_rect(50, 3, f.area());
         let modal = Paragraph::new(format!("{}\n{}", prompt, value))
             .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(RED)));
@@ -114,10 +128,25 @@ fn centered_rect(percent_x: u16, height: u16, r: ratatui::layout::Rect) -> ratat
         .split(popup_layout[1])[1]
 }
 
+// ... (other imports) ...
+
 fn handle_events(state: &mut AppState) -> io::Result<bool> {
     if event::poll(std::time::Duration::from_millis(100))? {
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Press {
+                // Modal input handling
+                if let Overlay::Input { ref mut value, .. } = state.overlay {
+                    match key.code {
+                        KeyCode::Enter => { /* Process action */ state.overlay = Overlay::None; }
+                        KeyCode::Char(c) => value.push(c),
+                        KeyCode::Backspace => { value.pop(); }
+                        KeyCode::Esc => state.overlay = Overlay::None,
+                        _ => {}
+                    }
+                    return Ok(false);
+                }
+
+                // Normal navigation
                 match key.code {
                     KeyCode::Char('q') => return Ok(true),
                     KeyCode::Down => {
@@ -129,8 +158,11 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                         state.list_state.select(i);
                     }
                     KeyCode::Char('f') => {
-                        // Example: Trigger Fetch
-                        eprintln!("Fetch triggered!"); 
+                        if let Some(repo) = &state.repo {
+                            if repo.fetch_all().is_ok() {
+                                state.overlay = Overlay::Message { text: "Fetched all remotes!".to_string(), is_error: false };
+                            }
+                        }
                     }
                     _ => {}
                 }

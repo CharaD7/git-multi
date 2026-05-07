@@ -100,12 +100,30 @@ fn ui(f: &mut Frame, state: &mut AppState) {
     f.render_widget(footer, layout[1]);
 
     // Render Overlay if active
-    if let Overlay::Input { prompt, value, .. } = &state.overlay {
-        let area = centered_rect(50, 3, f.area());
-        let modal = Paragraph::new(format!("{}\n{}", prompt, value))
-            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(RED)));
-        f.render_widget(ratatui::widgets::Clear, area);
-        f.render_widget(modal, area);
+    match &state.overlay {
+        Overlay::Input { prompt, value, .. } => {
+            let area = centered_rect(50, 3, f.area());
+            let modal = Paragraph::new(format!("{}\n{}", prompt, value))
+                .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(RED)));
+            f.render_widget(ratatui::widgets::Clear, area);
+            f.render_widget(modal, area);
+        }
+        Overlay::Message { text, is_error } => {
+            let area = centered_rect(50, 3, f.area());
+            let color = if *is_error { RED } else { VIBRANT_PINK };
+            let modal = Paragraph::new(text.as_str())
+                .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(color)));
+            f.render_widget(ratatui::widgets::Clear, area);
+            f.render_widget(modal, area);
+        }
+        Overlay::Confirm { question, .. } => {
+            let area = centered_rect(50, 3, f.area());
+            let modal = Paragraph::new(format!("{}\n[Y/N]", question))
+                .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(CYAN)));
+            f.render_widget(ratatui::widgets::Clear, area);
+            f.render_widget(modal, area);
+        }
+        Overlay::None => {}
     }
 }
 
@@ -128,22 +146,36 @@ fn centered_rect(percent_x: u16, height: u16, r: ratatui::layout::Rect) -> ratat
         .split(popup_layout[1])[1]
 }
 
-// ... (other imports) ...
-
 fn handle_events(state: &mut AppState) -> io::Result<bool> {
     if event::poll(std::time::Duration::from_millis(100))? {
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Press {
-                // Modal input handling
-                if let Overlay::Input { ref mut value, .. } = state.overlay {
-                    match key.code {
-                        KeyCode::Enter => { /* Process action */ state.overlay = Overlay::None; }
-                        KeyCode::Char(c) => value.push(c),
-                        KeyCode::Backspace => { value.pop(); }
-                        KeyCode::Esc => state.overlay = Overlay::None,
-                        _ => {}
+                // Overlay handling
+                match &mut state.overlay {
+                    Overlay::Input { ref mut value, .. } => {
+                        match key.code {
+                            KeyCode::Enter => state.overlay = Overlay::None,
+                            KeyCode::Char(c) => value.push(c),
+                            KeyCode::Backspace => { value.pop(); }
+                            KeyCode::Esc => state.overlay = Overlay::None,
+                            _ => {}
+                        }
+                        return Ok(false);
                     }
-                    return Ok(false);
+                    Overlay::Message { .. } => {
+                        if key.code == KeyCode::Enter || key.code == KeyCode::Esc {
+                            state.overlay = Overlay::None;
+                        }
+                        return Ok(false);
+                    }
+                    Overlay::Confirm { .. } => {
+                        if key.code == KeyCode::Char('y') {
+                            /* trigger action */
+                        }
+                        state.overlay = Overlay::None;
+                        return Ok(false);
+                    }
+                    Overlay::None => {}
                 }
 
                 // Normal navigation
@@ -161,6 +193,8 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                         if let Some(repo) = &state.repo {
                             if repo.fetch_all().is_ok() {
                                 state.overlay = Overlay::Message { text: "Fetched all remotes!".to_string(), is_error: false };
+                            } else {
+                                state.overlay = Overlay::Message { text: "Fetch failed!".to_string(), is_error: true };
                             }
                         }
                     }

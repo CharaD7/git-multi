@@ -13,9 +13,16 @@ A CLI tool for managing multiple Git remotes and syncing content between them. `
 
 ## Installation
 
+Build from source with Cargo:
+
 ```bash
 cargo install --path .
 ```
+
+For pre-built packages (`.deb`, `.rpm`, `.AppImage`, `.exe`/`.msi`, `.pkg`) with
+step-by-step extract / install / run instructions for every platform, see
+[`INSTALL.md`](./INSTALL.md) and the assets attached to each
+[GitHub release](https://github.com/CharaD7/git-multi/releases).
 
 ## Usage
 

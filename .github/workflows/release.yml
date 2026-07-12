@@ -1,0 +1,191 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Linux: .deb, .rpm, .AppImage, .tar.xz
+  # ---------------------------------------------------------------------------
+  linux:
+    name: Linux packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system + packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm squashfs-tools file
+          cargo install cargo-deb --locked
+          cargo install cargo-rpm --locked
+
+      - name: Build binary
+        run: cargo build --release
+
+      - name: Build .deb
+        run: cargo deb --no-build
+
+      - name: Build .rpm
+        run: cargo rpm build
+
+      - name: Build .AppImage
+        run: |
+          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool
+          chmod +x appimagetool
+          ./appimagetool --appimage-extract
+          APPDIR=AppDir
+          rm -rf "$APPDIR"
+          mkdir -p "$APPDIR/usr/bin"
+          cp target/release/git-multi "$APPDIR/usr/bin/git-multi"
+          cp assets/git-multi.desktop "$APPDIR/git-multi.desktop"
+          cp assets/git-multi.png "$APPDIR/git-multi.png"
+          mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
+          cp assets/git-multi.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/git-multi.png"
+          cat > "$APPDIR/AppRun" <<'EOF'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "$0")")"
+          exec "$HERE/usr/bin/git-multi" "$@"
+          EOF
+          chmod +x "$APPDIR/AppRun"
+          ARCH=x86_64 ./squashfs-root/AppRun "$APPDIR" "git-multi-x86_64-unknown-linux-gnu.AppImage"
+
+      - name: Stage artifacts
+        run: |
+          mkdir -p dist
+          cp target/debian/*.deb dist/
+          find target -name '*.rpm' -exec cp {} dist/ \;
+          cp git-multi-x86_64-unknown-linux-gnu.AppImage dist/
+          cp target/release/git-multi git-multi-bin
+          tar cJf dist/git-multi-x86_64-unknown-linux-gnu.tar.xz git-multi-bin
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*
+
+  # ---------------------------------------------------------------------------
+  # Windows: .exe (zip) + .msi
+  # ---------------------------------------------------------------------------
+  windows:
+    name: Windows packages
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build binary
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Install cargo-wix
+        run: cargo install cargo-wix --locked
+
+      - name: Build .msi
+        run: cargo wix --no-build
+
+      - name: Stage artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item target/x86_64-pc-windows-msvc/release/git-multi.exe -Destination git-multi-x86_64-pc-windows-msvc.exe
+          Compress-Archive -Path git-multi-x86_64-pc-windows-msvc.exe -DestinationPath dist/git-multi-x86_64-pc-windows-msvc.zip -Force
+          Copy-Item target/wix/*.msi -Destination dist/ -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+
+  # ---------------------------------------------------------------------------
+  # macOS: .pkg (x86_64 + aarch64) + .tar.xz
+  # ---------------------------------------------------------------------------
+  macos:
+    name: macOS packages
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - name: Build binaries
+        run: |
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          cargo build --release --target aarch64-apple-darwin
+
+      - name: Build .pkg (x86_64)
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p pkgroot-x86_64/usr/local/bin
+          cp target/x86_64-apple-darwin/release/git-multi pkgroot-x86_64/usr/local/bin/git-multi
+          chmod +x pkgroot-x86_64/usr/local/bin/git-multi
+          pkgbuild --identifier com.charad7.git-multi --version "$VERSION" --root pkgroot-x86_64 --install-location / git-multi-x86_64-apple-darwin.pkg
+
+      - name: Build .pkg (aarch64)
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p pkgroot-aarch64/usr/local/bin
+          cp target/aarch64-apple-darwin/release/git-multi pkgroot-aarch64/usr/local/bin/git-multi
+          chmod +x pkgroot-aarch64/usr/local/bin/git-multi
+          pkgbuild --identifier com.charad7.git-multi --version "$VERSION" --root pkgroot-aarch64 --install-location / git-multi-aarch64-apple-darwin.pkg
+
+      - name: Stage artifacts
+        run: |
+          mkdir -p dist
+          tar cJf dist/git-multi-x86_64-apple-darwin.tar.xz -C target/x86_64-apple-darwin/release git-multi
+          tar cJf dist/git-multi-aarch64-apple-darwin.tar.xz -C target/aarch64-apple-darwin/release git-multi
+          cp git-multi-x86_64-apple-darwin.pkg dist/
+          cp git-multi-aarch64-apple-darwin.pkg dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*
+
+  # ---------------------------------------------------------------------------
+  # Publish everything to the GitHub Release for this tag
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish GitHub Release
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: List artifacts
+        run: find dist -type f -exec ls -la {} \;
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: git-multi ${{ github.ref_name }}
+          body_path: INSTALL.md
+          files: dist/**/*
+          fail_on_unmatched_glob: false

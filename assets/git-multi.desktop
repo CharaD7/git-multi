@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=git-multi
+Comment=Manage multiple Git remotes and sync content between them
+Exec=git-multi
+Icon=git-multi
+Terminal=true
+Type=Application
+Categories=Utility;Development;

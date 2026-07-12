@@ -31,8 +31,10 @@ enum Overlay {
     CreateBranch { step: u8, name: String, base: String, remote: String },
     DeleteBranch { name: String },
     RenameBranch { old: String, value: String },
-    MergeRemote { value: String },
-    MergeBranch { src_remote: String, value: String },
+    Merge { step: u8, src_remote: String, src_branch: String, dest_remote: String, dest_branch: String },
+    CommitType { value: String },
+    CommitMsg { value: String },
+    CommitBody { value: String },
     Message { text: String, is_error: bool },
 }
 
@@ -57,6 +59,8 @@ struct AppState {
     overlay: Overlay,
     log: Vec<String>,
     status_mode: bool,
+    commits_mode: bool,
+    commit_msg: String,
 }
 
 impl AppState {
@@ -72,6 +76,8 @@ impl AppState {
             overlay: Overlay::None,
             log: Vec::new(),
             status_mode: false,
+            commits_mode: false,
+            commit_msg: String::new(),
         };
         state.refresh();
         state.remote_state.select(Some(0));
@@ -218,45 +224,35 @@ impl AppState {
         }
     }
 
-    fn action_merge(&mut self, src_remote: String, src_branch: String) {
-        let target = self.selected_remote_name();
-        let cur = match self.repo.current_branch() {
-            Ok(Some(b)) => b,
-            _ => {
-                self.log("No current branch to merge into".to_string());
-                return;
-            }
-        };
+    fn action_merge_explicit(&mut self, src_remote: String, src_branch: String, dest_remote: String, dest_branch: String) {
         let src_ref = format!("refs/remotes/{}/{}", src_remote, src_branch);
         let result = self
             .repo
             .fetch_remote(&src_remote)
-            .and_then(|_| {
-                if let Some(t) = &target {
-                    self.repo.fetch_remote(t)
-                } else {
-                    Ok(())
-                }
-            })
-            .and_then(|_| self.repo.checkout_branch(&cur))
+            .and_then(|_| self.repo.fetch_remote(&dest_remote))
+            .and_then(|_| self.repo.checkout_branch(&dest_branch))
             .and_then(|_| self.repo.merge_and_commit(&src_ref))
-            .and_then(|_| {
-                if let Some(t) = &target {
-                    self.repo.push_to_remote(t, Some(&cur))
-                } else {
-                    Ok(())
-                }
-            });
+            .and_then(|_| self.repo.push_to_remote(&dest_remote, Some(&dest_branch)));
 
         match result {
             Ok(()) => {
                 self.refresh();
                 self.log(format!(
-                    "Merged {}/{} into {} and pushed to {:?}",
-                    src_remote, src_branch, cur, target
+                    "Merged {}/{} into {}/{} and pushed",
+                    src_remote, src_branch, dest_remote, dest_branch
                 ));
             }
             Err(e) => self.log(format!("Merge failed: {}", e)),
+        }
+    }
+
+    fn action_commit(&mut self, subject: String, body: Option<&str>) {
+        match self.repo.create_commit(&subject, body) {
+            Ok(_) => {
+                self.refresh();
+                self.log(format!("Created commit: {}", subject));
+            }
+            Err(e) => self.log(format!("Commit failed: {}", e)),
         }
     }
 }
@@ -272,9 +268,6 @@ pub fn run_tui() -> io::Result<()> {
     };
 
     loop {
-        // Refresh is on-demand (lazygit-style): state is loaded at startup,
-        // after every mutating action, when switching focus, and via `r`.
-        // No tight timer poll, so the UI stays responsive.
         terminal.draw(|f| ui(f, &mut state))?;
         if handle_events(&mut state)? {
             break;
@@ -296,32 +289,22 @@ fn ui(f: &mut Frame, state: &mut AppState) {
         .constraints([Constraint::Percentage(26), Constraint::Percentage(32), Constraint::Percentage(42)])
         .split(layout[0]);
 
-    // Remotes panel
     let default = state.repo.config.get_default_remote().cloned();
     let items: Vec<ListItem> = state
         .remotes
         .iter()
         .map(|r| {
-            let marker = if default.as_deref() == Some(&r.name) {
-                " [default]"
-            } else {
-                ""
-            };
+            let marker = if default.as_deref() == Some(&r.name) { " [default]" } else { "" };
             ListItem::new(format!("{}{}", r.name, marker))
         })
         .collect();
-    let remote_title = if state.focus == Focus::Remotes {
-        " Remotes (focused) "
-    } else {
-        " Remotes "
-    };
+    let remote_title = if state.focus == Focus::Remotes { " Remotes (focused) " } else { " Remotes " };
     let list = List::new(items)
         .block(Block::default().title(remote_title).borders(Borders::ALL).border_style(border_style(state.focus == Focus::Remotes)))
         .highlight_style(Style::default().bg(CYAN).fg(Color::Black))
         .highlight_symbol(">> ");
     f.render_stateful_widget(list, inner_layout[0], &mut state.remote_state);
 
-    // Branches panel (local branches, multi-select)
     let branch_items: Vec<ListItem> = state
         .branches
         .iter()
@@ -330,11 +313,7 @@ fn ui(f: &mut Frame, state: &mut AppState) {
             ListItem::new(format!("{} {}", mark, b))
         })
         .collect();
-    let branch_title = if state.focus == Focus::Branches {
-        " Branches (focused) "
-    } else {
-        " Branches "
-    };
+    let branch_title = if state.focus == Focus::Branches { " Branches (focused) " } else { " Branches " };
     let sel_count = state.selected_branches().len();
     let branch_block = Block::default()
         .title(format!("{} [{} selected]", branch_title, sel_count))
@@ -346,26 +325,25 @@ fn ui(f: &mut Frame, state: &mut AppState) {
         .highlight_symbol(">> ");
     f.render_stateful_widget(branch_list, inner_layout[1], &mut state.branch_state);
 
-    // Details / Status panel
     let detail = if state.status_mode {
         state.repo.status_text().unwrap_or_else(|e| format!("Error: {}", e))
+    } else if state.commits_mode {
+        build_commits(state)
     } else {
         build_detail(state)
     };
-    let detail_title = if state.status_mode { " Status " } else { " Details " };
+    let detail_title = if state.status_mode { " Status " } else if state.commits_mode { " Commits " } else { " Details " };
     let main_view = Paragraph::new(detail)
         .block(Block::default().title(detail_title).borders(Borders::ALL).border_style(Style::default().fg(MAUVE)))
         .style(Style::default().fg(CREAM));
     f.render_widget(main_view, inner_layout[2]);
 
-    // Footer
-    let help_text = " [Tab] Focus  [↑/↓] Move  [Space] Toggle  [a] Add  [R] Rename remote  [x] Remove  [D] Default  [c] Create  [m] Rename branch  [f/Enter] Fetch  [p] Push  [l] Pull  [M] Merge  [s] Status  [r] Refresh  [q] Quit ";
+    let help_text = " [Tab] Focus  [↑/↓] Move  [Space] Toggle  [a] Add  [R] Rename remote  [x] Remove  [D] Default  [c] Create  [m] Rename branch  [f/Enter] Fetch  [p] Push  [l] Pull  [M] Merge  [v] View commits  [C] Commit  [s] Status  [r] Refresh  [q] Quit ";
     let footer = Paragraph::new(help_text)
         .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(CYAN)))
         .style(Style::default().fg(CREAM).bg(Color::Rgb(50, 50, 50)));
     f.render_widget(footer, layout[1]);
 
-    // Overlay
     match &state.overlay {
         Overlay::AddName { value } => {
             let area = centered_rect(60, 3, f.area());
@@ -421,17 +399,37 @@ fn ui(f: &mut Frame, state: &mut AppState) {
             f.render_widget(ratatui::widgets::Clear, area);
             f.render_widget(modal, area);
         }
-        Overlay::MergeRemote { value } => {
-            let area = centered_rect(60, 3, f.area());
-            let modal = Paragraph::new(format!("Merge from remote:\n> {}\u{2588}", value))
-                .block(Block::default().title(" Merge ").borders(Borders::ALL).border_style(Style::default().fg(VIBRANT_PINK)));
+        Overlay::Merge { step, src_remote, src_branch, dest_remote, dest_branch } => {
+            let (title, prompt) = match step {
+                0 => (" Merge ", format!("Source remote:\n> {}\u{2588}", src_remote)),
+                1 => (" Merge ", format!("Source branch (from {}/{}):\n> {}\u{2588}", src_remote, src_remote, src_branch)),
+                2 => (" Merge ", format!("Destination remote:\n> {}\u{2588}", dest_remote)),
+                _ => (" Merge ", format!("Destination branch:\n> {}\u{2588}", dest_branch)),
+            };
+            let area = centered_rect(65, 3, f.area());
+            let modal = Paragraph::new(prompt)
+                .block(Block::default().title(title).borders(Borders::ALL).border_style(Style::default().fg(VIBRANT_PINK)));
             f.render_widget(ratatui::widgets::Clear, area);
             f.render_widget(modal, area);
         }
-        Overlay::MergeBranch { src_remote, value } => {
-            let area = centered_rect(65, 3, f.area());
-            let modal = Paragraph::new(format!("Merge branch from '{}':\n> {}\u{2588}", src_remote, value))
-                .block(Block::default().title(" Merge ").borders(Borders::ALL).border_style(Style::default().fg(VIBRANT_PINK)));
+        Overlay::CommitType { value } => {
+            let area = centered_rect(60, 5, f.area());
+            let modal = Paragraph::new(format!("Select commit type:\n\n[f] feat  [x] fix  [d] docs  [s] style  [r] refactor\n[T] test  [c] chore  [b] build  [p] perf\n\nOr type to filter:\n> {}\u{2588}", value))
+                .block(Block::default().title(" Commit Type ").borders(Borders::ALL).border_style(Style::default().fg(GREEN)));
+            f.render_widget(ratatui::widgets::Clear, area);
+            f.render_widget(modal, area);
+        }
+        Overlay::CommitMsg { value } => {
+            let area = centered_rect(70, 3, f.area());
+            let modal = Paragraph::new(format!("Commit subject:\n> {}\u{2588}", value))
+                .block(Block::default().title(" Commit Message ").borders(Borders::ALL).border_style(Style::default().fg(GREEN)));
+            f.render_widget(ratatui::widgets::Clear, area);
+            f.render_widget(modal, area);
+        }
+        Overlay::CommitBody { value } => {
+            let area = centered_rect(70, 5, f.area());
+            let modal = Paragraph::new(format!("Commit body (optional, Enter to skip):\n> {}\u{2588}", value))
+                .block(Block::default().title(" Commit Body ").borders(Borders::ALL).border_style(Style::default().fg(GREEN)));
             f.render_widget(ratatui::widgets::Clear, area);
             f.render_widget(modal, area);
         }
@@ -448,11 +446,7 @@ fn ui(f: &mut Frame, state: &mut AppState) {
 }
 
 fn border_style(focused: bool) -> Style {
-    if focused {
-        Style::default().fg(CYAN)
-    } else {
-        Style::default().fg(GRAY)
-    }
+    if focused { Style::default().fg(CYAN) } else { Style::default().fg(GRAY) }
 }
 
 fn build_detail(state: &AppState) -> String {
@@ -460,44 +454,40 @@ fn build_detail(state: &AppState) -> String {
     match state.remote_state.selected().and_then(|i| state.remotes.get(i)) {
         Some(r) => {
             let default = state.repo.config.get_default_remote().cloned();
-            let default_mark = if default.as_deref() == Some(&r.name) {
-                " [default]"
-            } else {
-                ""
-            };
+            let default_mark = if default.as_deref() == Some(&r.name) { " [default]" } else { "" };
             out.push_str(&format!("Remote: {}{}\n", r.name, default_mark));
             out.push_str(&format!("URL:    {}\n", r.url));
-
             if let Some(branch) = state.repo.current_branch().ok().flatten() {
                 out.push_str(&format!("Current branch: {}\n", branch));
             }
-
             let selected = state.selected_branches();
             if selected.is_empty() {
                 out.push_str("\nTarget: all branches (or current branch for push/pull)\n");
             } else {
                 out.push_str(&format!("\nTarget branches ({}):\n", selected.len()));
-                for b in &selected {
-                    out.push_str(&format!("  - {}\n", b));
-                }
+                for b in &selected { out.push_str(&format!("  - {}\n", b)); }
             }
-
             out.push_str("\nRemote actions:\n");
             out.push_str("  [a] Add   [R] Rename   [x] Remove   [D] Set default\n");
             out.push_str("  [f]/[Enter] Fetch   [p] Push   [l] Pull   [M] Merge\n");
         }
-        None => {
-            out.push_str("No remotes configured.\n\nPress [a] to add a remote.");
-        }
+        None => { out.push_str("No remotes configured.\n\nPress [a] to add a remote."); }
     }
-
     out.push_str("\nBranch actions (focus Branches):\n");
     out.push_str("  [c] Create   [m] Rename   [x] Delete   [Space] toggle\n");
-
     out.push_str("\nLog:\n");
     let start = state.log.len().saturating_sub(10);
-    for line in &state.log[start..] {
-        out.push_str(&format!("  {}\n", line));
+    for line in &state.log[start..] { out.push_str(&format!("  {}\n", line)); }
+    out
+}
+
+fn build_commits(state: &AppState) -> String {
+    let mut out = String::new();
+    if let Ok(commits) = state.repo.list_recent_commits(20) {
+        out.push_str("Recent commits:\n\n");
+        for c in commits { out.push_str(&format!("  {}\n", c)); }
+    } else {
+        out.push_str("Unable to load commits\n");
     }
     out
 }
@@ -505,11 +495,7 @@ fn build_detail(state: &AppState) -> String {
 fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(50),
-            Constraint::Length(height),
-            Constraint::Percentage(50),
-        ])
+        .constraints([Constraint::Percentage(50), Constraint::Length(height), Constraint::Percentage(50)])
         .split(r);
     Layout::default()
         .direction(Direction::Horizontal)
@@ -530,14 +516,10 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                         match key.code {
                             KeyCode::Enter => {
                                 let name = value.trim().to_string();
-                                if !name.is_empty() {
-                                    state.overlay = Overlay::AddUrl { name, value: String::new() };
-                                }
+                                if !name.is_empty() { state.overlay = Overlay::AddUrl { name, value: String::new() }; }
                             }
                             KeyCode::Char(c) => value.push(c),
-                            KeyCode::Backspace => {
-                                value.pop();
-                            }
+                            KeyCode::Backspace => { value.pop(); }
                             KeyCode::Esc => state.overlay = Overlay::None,
                             _ => {}
                         }
@@ -554,24 +536,14 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                                             state.refresh();
                                             state.select_remote_by_name(&nm);
                                             state.log(format!("Added remote '{}'", nm));
-                                            state.overlay = Overlay::Message {
-                                                text: format!("Added remote '{}'", nm),
-                                                is_error: false,
-                                            };
+                                            state.overlay = Overlay::Message { text: format!("Added remote '{}'", nm), is_error: false };
                                         }
-                                        Err(e) => {
-                                            state.overlay = Overlay::Message {
-                                                text: format!("Error: {}", e),
-                                                is_error: true,
-                                            };
-                                        }
+                                        Err(e) => { state.overlay = Overlay::Message { text: format!("Error: {}", e), is_error: true }; }
                                     }
                                 }
                             }
                             KeyCode::Char(c) => value.push(c),
-                            KeyCode::Backspace => {
-                                value.pop();
-                            }
+                            KeyCode::Backspace => { value.pop(); }
                             KeyCode::Esc => state.overlay = Overlay::None,
                             _ => {}
                         }
@@ -588,22 +560,14 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                                             state.refresh();
                                             state.select_remote_by_name(&new);
                                             state.log(format!("Renamed remote '{}' -> '{}'", o, new));
-                                            state.overlay = Overlay::Message {
-                                                text: format!("Renamed remote '{}' -> '{}'", o, new),
-                                                is_error: false,
-                                            };
+                                            state.overlay = Overlay::Message { text: format!("Renamed remote '{}' -> '{}'", o, new), is_error: false };
                                         }
-                                        Err(e) => {
-                                            state.overlay = Overlay::Message {
-                                                text: format!("Error: {}", e),
-                                                is_error: true,
-                                            };
-                                        }
+                                        Err(e) => { state.overlay = Overlay::Message { text: format!("Error: {}", e), is_error: true }; }
                                     }
                                 }
                             }
                             KeyCode::Char(c) => value.push(c),
-                            KeyCode::Backspace => { value.pop(); },
+                            KeyCode::Backspace => { value.pop(); }
                             KeyCode::Esc => state.overlay = Overlay::None,
                             _ => {}
                         }
@@ -616,17 +580,9 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                                 Ok(()) => {
                                     state.refresh();
                                     state.log(format!("Removed remote '{}'", nm));
-                                    state.overlay = Overlay::Message {
-                                        text: format!("Removed remote '{}'", nm),
-                                        is_error: false,
-                                    };
+                                    state.overlay = Overlay::Message { text: format!("Removed remote '{}'", nm), is_error: false };
                                 }
-                                Err(e) => {
-                                    state.overlay = Overlay::Message {
-                                        text: format!("Error: {}", e),
-                                        is_error: true,
-                                    };
-                                }
+                                Err(e) => { state.overlay = Overlay::Message { text: format!("Error: {}", e), is_error: true }; }
                             }
                         } else if matches!(key.code, KeyCode::Char('n') | KeyCode::Esc) {
                             state.overlay = Overlay::None;
@@ -641,65 +597,33 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                                     if !n.is_empty() {
                                         *step = 1;
                                         base.clear();
-                                        if let Ok(Some(b)) = state.repo.current_branch() {
-                                            base.push_str(&b);
-                                        } else {
-                                            base.push_str("main");
-                                        }
+                                        if let Ok(Some(b)) = state.repo.current_branch() { base.push_str(&b); }
+                                        else { base.push_str("main"); }
                                     }
                                 }
                                 1 => {
                                     *step = 2;
                                     remote.clear();
-                                    let rname = state
-                                        .remote_state
-                                        .selected()
-                                        .and_then(|i| state.remotes.get(i))
-                                        .map(|x| x.name.clone());
-                                    if let Some(r) = rname {
-                                        remote.push_str(&r);
-                                    }
                                 }
                                 2 => {
                                     let nm = name.trim().to_string();
                                     let base_spec = if base.trim().is_empty() {
                                         state.repo.current_branch().ok().flatten().unwrap_or_else(|| "main".to_string())
-                                    } else {
-                                        base.trim().to_string()
-                                    };
+                                    } else { base.trim().to_string() };
                                     let rm = remote.trim().to_string();
                                     if !nm.is_empty() {
-                                        let res = state
-                                            .repo
-                                            .resolve_commit_spec(&base_spec)
+                                        let res = state.repo.resolve_commit_spec(&base_spec)
                                             .and_then(|oid| Ok(state.repo.repo.find_commit(oid)?))
-                                            .and_then(|commit| {
-                                                state.repo.repo.branch(&nm, &commit, false)?;
-                                                Ok(())
-                                            })
-                                            .and_then(|_| {
-                                                if rm.is_empty() {
-                                                    Ok(())
-                                                } else {
-                                                    state.repo.push_to_remote(&rm, Some(&nm))
-                                                }
-                                            });
+                                            .and_then(|commit| { state.repo.repo.branch(&nm, &commit, false)?; Ok(()) })
+                                            .and_then(|_| if rm.is_empty() { Ok(()) } else { state.repo.push_to_remote(&rm, Some(&nm)) });
                                         match res {
                                             Ok(()) => {
                                                 state.refresh();
                                                 state.select_branch_by_name(&nm);
                                                 state.log(format!("Created branch '{}'", nm));
-                                                state.overlay = Overlay::Message {
-                                                    text: format!("Created branch '{}'", nm),
-                                                    is_error: false,
-                                                };
+                                                state.overlay = Overlay::Message { text: format!("Created branch '{}'", nm), is_error: false };
                                             }
-                                            Err(e) => {
-                                                state.overlay = Overlay::Message {
-                                                    text: format!("Error: {}", e),
-                                                    is_error: true,
-                                                };
-                                            }
+                                            Err(e) => { state.overlay = Overlay::Message { text: format!("Error: {}", e), is_error: true }; }
                                         }
                                     }
                                 }
@@ -712,15 +636,9 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                                 _ => {}
                             },
                             KeyCode::Backspace => match *step {
-                                0 => {
-                                    name.pop();
-                                }
-                                1 => {
-                                    base.pop();
-                                }
-                                2 => {
-                                    remote.pop();
-                                }
+                                0 => { name.pop(); }
+                                1 => { base.pop(); }
+                                2 => { remote.pop(); }
                                 _ => {}
                             },
                             KeyCode::Esc => state.overlay = Overlay::None,
@@ -735,17 +653,9 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                                 Ok(()) => {
                                     state.refresh();
                                     state.log(format!("Deleted branch '{}'", nm));
-                                    state.overlay = Overlay::Message {
-                                        text: format!("Deleted branch '{}'", nm),
-                                        is_error: false,
-                                    };
+                                    state.overlay = Overlay::Message { text: format!("Deleted branch '{}'", nm), is_error: false };
                                 }
-                                Err(e) => {
-                                    state.overlay = Overlay::Message {
-                                        text: format!("Error: {}", e),
-                                        is_error: true,
-                                    };
-                                }
+                                Err(e) => { state.overlay = Overlay::Message { text: format!("Error: {}", e), is_error: true }; }
                             }
                         } else if matches!(key.code, KeyCode::Char('n') | KeyCode::Esc) {
                             state.overlay = Overlay::None;
@@ -763,75 +673,141 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                                             state.refresh();
                                             state.select_branch_by_name(&new);
                                             state.log(format!("Renamed branch '{}' -> '{}'", o, new));
-                                            state.overlay = Overlay::Message {
-                                                text: format!("Renamed branch '{}' -> '{}'", o, new),
-                                                is_error: false,
-                                            };
+                                            state.overlay = Overlay::Message { text: format!("Renamed branch '{}' -> '{}'", o, new), is_error: false };
                                         }
-                                        Err(e) => {
-                                            state.overlay = Overlay::Message {
-                                                text: format!("Error: {}", e),
-                                                is_error: true,
-                                            };
-                                        }
+                                        Err(e) => { state.overlay = Overlay::Message { text: format!("Error: {}", e), is_error: true }; }
                                     }
                                 }
                             }
                             KeyCode::Char(c) => value.push(c),
-                            KeyCode::Backspace => { value.pop(); },
+                            KeyCode::Backspace => { value.pop(); }
                             KeyCode::Esc => state.overlay = Overlay::None,
                             _ => {}
                         }
                         return Ok(false);
                     }
-                    Overlay::MergeRemote { value } => {
+                    Overlay::Merge { step, src_remote, src_branch, dest_remote, dest_branch } => {
                         match key.code {
-                            KeyCode::Enter => {
-                                let r = value.trim().to_string();
-                                if !r.is_empty() {
-                                    state.overlay = Overlay::MergeBranch { src_remote: r, value: String::new() };
+                            KeyCode::Enter => match *step {
+                                0 => {
+                                    if !src_remote.trim().is_empty() {
+                                        *step = 1;
+                                        src_branch.clear();
+                                        if let Ok(Some(b)) = state.repo.current_branch() { src_branch.push_str(&b); }
+                                    }
                                 }
-                            }
-                            KeyCode::Char(c) => value.push(c),
-                            KeyCode::Backspace => { value.pop(); },
+                                1 => {
+                                    if !src_branch.trim().is_empty() {
+                                        *step = 2;
+                                        dest_remote.clear();
+                                    }
+                                }
+                                2 => {
+                                    if !dest_remote.trim().is_empty() {
+                                        *step = 3;
+                                        dest_branch.clear();
+                                        if let Ok(Some(b)) = state.repo.current_branch() { dest_branch.push_str(&b); }
+                                    }
+                                }
+                                3 => {
+                                    if !dest_branch.trim().is_empty() {
+                                        let sr = src_remote.clone();
+                                        let sb = src_branch.clone();
+                                        let dr = dest_remote.clone();
+                                        let db = dest_branch.clone();
+                                        state.action_merge_explicit(sr, sb, dr, db);
+                                        state.overlay = Overlay::Message { text: "Merge complete (see log)".to_string(), is_error: false };
+                                    }
+                                }
+                                _ => {}
+                            },
+                            KeyCode::Char(c) => match *step {
+                                0 => src_remote.push(c),
+                                1 => src_branch.push(c),
+                                2 => dest_remote.push(c),
+                                3 => dest_branch.push(c),
+                                _ => {}
+                            },
+                            KeyCode::Backspace => match *step {
+                                0 => { src_remote.pop(); }
+                                1 => { src_branch.pop(); }
+                                2 => { dest_remote.pop(); }
+                                3 => { dest_branch.pop(); }
+                                _ => {}
+                            },
                             KeyCode::Esc => state.overlay = Overlay::None,
                             _ => {}
                         }
                         return Ok(false);
                     }
-                    Overlay::MergeBranch { src_remote, value } => {
+                    Overlay::CommitType { value } => {
                         match key.code {
+                            KeyCode::Char('f') => { *value = "feat:".to_string(); }
+                            KeyCode::Char('x') => { *value = "fix:".to_string(); }
+                            KeyCode::Char('d') => { *value = "docs:".to_string(); }
+                            KeyCode::Char('s') => { *value = "style:".to_string(); }
+                            KeyCode::Char('r') => { *value = "refactor:".to_string(); }
+                            KeyCode::Char('T') => { *value = "test:".to_string(); }
+                            KeyCode::Char('c') => { *value = "chore:".to_string(); }
+                            KeyCode::Char('b') => { *value = "build:".to_string(); }
+                            KeyCode::Char('p') => { *value = "perf:".to_string(); }
                             KeyCode::Enter => {
-                                let b = value.trim().to_string();
-                                if !b.is_empty() {
-                                    let sr = src_remote.clone();
-                                    state.action_merge(sr, b);
-                                    state.overlay = Overlay::Message {
-                                        text: "Merge complete (see log)".to_string(),
-                                        is_error: false,
-                                    };
+                                let msg = value.trim();
+                                if !msg.is_empty() && !msg.ends_with(':') {
+                                    state.overlay = Overlay::CommitMsg { value: msg.to_string() };
                                 }
                             }
-                            KeyCode::Char(c) => value.push(c),
-                            KeyCode::Backspace => { value.pop(); },
+                            KeyCode::Char(c) => { value.push(c); }
+                            KeyCode::Backspace => { value.pop(); }
+                            KeyCode::Esc => state.overlay = Overlay::None,
+                            _ => {}
+                        }
+                        return Ok(false);
+                    }
+                    Overlay::CommitMsg { value } => {
+                        match key.code {
+                            KeyCode::Enter => {
+                                state.commit_msg = value.trim().to_string();
+                                state.overlay = Overlay::CommitBody { value: String::new() };
+                            }
+                            KeyCode::Char(c) => { value.push(c); }
+                            KeyCode::Backspace => { value.pop(); }
+                            KeyCode::Esc => state.overlay = Overlay::None,
+                            _ => {}
+                        }
+                        return Ok(false);
+                    }
+                    Overlay::CommitBody { value } => {
+                        match key.code {
+                            KeyCode::Enter => {
+                                let msg = state.commit_msg.clone();
+                                let body = if value.trim().is_empty() { None } else { Some(value.trim().to_string()) };
+                                state.action_commit(msg, body.as_deref());
+                                state.overlay = Overlay::Message { text: "Commit created (see log)".to_string(), is_error: false };
+                            }
+                            KeyCode::Char(c) => { value.push(c); }
+                            KeyCode::Backspace => { value.pop(); }
                             KeyCode::Esc => state.overlay = Overlay::None,
                             _ => {}
                         }
                         return Ok(false);
                     }
                     Overlay::Message { .. } => {
-                        if key.code == KeyCode::Enter || key.code == KeyCode::Esc {
-                            state.overlay = Overlay::None;
-                        }
+                        if key.code == KeyCode::Enter || key.code == KeyCode::Esc { state.overlay = Overlay::None; }
                         return Ok(false);
                     }
                     Overlay::None => {}
                 }
 
-                // Normal navigation / actions
-                // Shift+M => merge (works regardless of focus)
-                if key.modifiers.contains(KeyModifiers::SHIFT) && key.code == KeyCode::Char('m') {
-                    state.overlay = Overlay::MergeRemote { value: String::new() };
+                // Shift+M => merge (works regardless of focus), also accept uppercase M
+                if (key.modifiers.contains(KeyModifiers::SHIFT) && key.code == KeyCode::Char('m')) || key.code == KeyCode::Char('M') {
+                    state.overlay = Overlay::Merge {
+                        step: 0,
+                        src_remote: String::new(),
+                        src_branch: String::new(),
+                        dest_remote: String::new(),
+                        dest_branch: String::new(),
+                    };
                     return Ok(false);
                 }
 
@@ -842,7 +818,6 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                             Focus::Remotes => Focus::Branches,
                             Focus::Branches => Focus::Remotes,
                         };
-                        // Reload context so the focused panel reflects current state.
                         state.refresh();
                     }
                     KeyCode::Down => match state.focus {
@@ -862,50 +837,28 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                     KeyCode::Up => match state.focus {
                         Focus::Remotes => {
                             if !state.remotes.is_empty() {
-                                let i = state.remote_state.selected().map(|i| {
-                                    if i == 0 {
-                                        state.remotes.len() - 1
-                                    } else {
-                                        i - 1
-                                    }
-                                });
+                                let i = state.remote_state.selected().map(|i| if i == 0 { state.remotes.len() - 1 } else { i - 1 });
                                 state.remote_state.select(i);
                             }
                         }
                         Focus::Branches => {
                             if !state.branches.is_empty() {
-                                let i = state.branch_state.selected().map(|i| {
-                                    if i == 0 {
-                                        state.branches.len() - 1
-                                    } else {
-                                        i - 1
-                                    }
-                                });
+                                let i = state.branch_state.selected().map(|i| if i == 0 { state.branches.len() - 1 } else { i - 1 });
                                 state.branch_state.select(i);
                             }
                         }
                     },
                     KeyCode::Char(' ') => {
-                        if state.focus == Focus::Branches {
-                            if let Some(i) = state.branch_state.selected() {
-                                if let Some((_, sel)) = state.branches.get_mut(i) {
-                                    *sel = !*sel;
-                                }
-                            }
+                        if let Some(i) = state.branch_state.selected() {
+                            if let Some((_, sel)) = state.branches.get_mut(i) { *sel = !*sel; }
                         }
                     }
                     KeyCode::Char('r') => state.refresh(),
                     KeyCode::Char('s') => state.status_mode = !state.status_mode,
-                    KeyCode::Char('a') => {
-                        state.overlay = Overlay::AddName { value: String::new() };
-                    }
+                    KeyCode::Char('v') => state.commits_mode = !state.commits_mode,
+                    KeyCode::Char('a') => { state.overlay = Overlay::AddName { value: String::new() }; }
                     KeyCode::Char('c') => {
-                        state.overlay = Overlay::CreateBranch {
-                            step: 0,
-                            name: String::new(),
-                            base: String::new(),
-                            remote: String::new(),
-                        };
+                        state.overlay = Overlay::CreateBranch { step: 0, name: String::new(), base: String::new(), remote: String::new() };
                     }
                     KeyCode::Char('m') => {
                         if let Some(name) = state.selected_branch_name() {
@@ -916,21 +869,21 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                     KeyCode::Char('p') => state.action_push(),
                     KeyCode::Char('l') => state.action_pull(),
                     KeyCode::Enter => state.action_fetch(),
+                    // Shift+C => commit (works regardless of focus), also accept uppercase C
+                    KeyCode::Char('C') => {
+                        state.overlay = Overlay::CommitType { value: String::new() };
+                        return Ok(false);
+                    }
                     _ => {}
                 }
 
-                // Focus-specific single-key actions
                 match state.focus {
                     Focus::Remotes => match key.code {
                         KeyCode::Char('R') => {
-                            if let Some(name) = state.selected_remote_name() {
-                                state.overlay = Overlay::RenameRemote { old: name, value: String::new() };
-                            }
+                            if let Some(name) = state.selected_remote_name() { state.overlay = Overlay::RenameRemote { old: name, value: String::new() }; }
                         }
                         KeyCode::Char('x') | KeyCode::Delete => {
-                            if let Some(name) = state.selected_remote_name() {
-                                state.overlay = Overlay::RemoveRemote { name };
-                            }
+                            if let Some(name) = state.selected_remote_name() { state.overlay = Overlay::RemoveRemote { name }; }
                         }
                         KeyCode::Char('D') => {
                             if let Some(name) = state.selected_remote_name() {
@@ -945,9 +898,7 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                     },
                     Focus::Branches => match key.code {
                         KeyCode::Char('x') | KeyCode::Delete => {
-                            if let Some(name) = state.selected_branch_name() {
-                                state.overlay = Overlay::DeleteBranch { name };
-                            }
+                            if let Some(name) = state.selected_branch_name() { state.overlay = Overlay::DeleteBranch { name }; }
                         }
                         _ => {}
                     },

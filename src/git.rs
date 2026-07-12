@@ -726,6 +726,56 @@ impl GitRepo {
         
         Ok(())
     }
+
+    /// Create a commit with optional body. Stages all changes first.
+    pub fn create_commit(&self, subject: &str, body: Option<&str>) -> Result<()> {
+        let workdir = self.repo.workdir().unwrap_or_else(|| self.repo.path());
+        
+        // Stage all changes
+        let status = Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(workdir)
+            .status()
+            .map_err(GitMultiError::IoError)?;
+        
+        if !status.success() {
+            return Err(GitMultiError::SyncError("git add failed".to_string()));
+        }
+        
+        // Create commit using git CLI
+        let full_msg = if let Some(b) = body {
+            format!("{}\n\n{}", subject, b)
+        } else {
+            subject.to_string()
+        };
+        
+        let status = Command::new("git")
+            .args(["commit", "-m", &full_msg])
+            .current_dir(workdir)
+            .status()
+            .map_err(GitMultiError::IoError)?;
+        
+        if !status.success() {
+            return Err(GitMultiError::SyncError(
+                format!("git commit failed with exit code: {}", status.code().unwrap_or(-1))
+            ));
+        }
+        Ok(())
+    }
+
+    /// List recent commits for display
+    pub fn list_recent_commits(&self, count: usize) -> Result<Vec<String>> {
+        let workdir = self.repo.workdir().unwrap_or_else(|| self.repo.path());
+        
+        let status = Command::new("git")
+            .args(["log", "-n", &count.to_string(), "--oneline", "--decorate"])
+            .current_dir(workdir)
+            .output()
+            .map_err(GitMultiError::IoError)?;
+        
+        let out = String::from_utf8_lossy(&status.stdout);
+        Ok(out.lines().map(|l| l.to_string()).collect())
+    }
 }
 
 /// Information about branches

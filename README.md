@@ -34,7 +34,9 @@ Navigation & global keys:
 - `Space` — toggle multi-select of a branch (branches show `[x]`/`[ ]`)
 - `f` / `Enter` — fetch the selected remote (+ selected branches)
 - `p` — push, `l` — pull the selected remote (+ selected branches)
-- `M` (Shift+M) — merge a branch from one remote into the current branch and push to the selected remote
+- `M` — merge across remotes (4-step flow: source remote, source branch, dest remote, dest branch)
+- `v` — toggle Commits view in the Details panel
+- `C` — create a commit (select type, enter subject, optional body)
 - `s` — toggle the Status view (remotes, local branches, working tree)
 - `r` — force refresh, `q` — quit
 
@@ -50,6 +52,19 @@ Branch actions (when the **Branches** panel is focused):
 - `x` / `Delete` — delete the selected local branch (confirm with `y`)
 
 With no branch selected, fetch/pull target all branches and push targets the current branch.
+
+**Merge (GUI, `M`):** A 4-step interactive flow:
+1. Source remote (e.g., `upstream`)
+2. Source branch (e.g., `main`)
+3. Destination remote (e.g., `origin`)
+4. Destination branch (e.g., `main`)
+
+**Commits (GUI, `v`):** View recent commits in the Details panel.
+
+**Create Commit (GUI, `C`):** A 3-step flow for conventional commits:
+1. Select type (`feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`, `build`, `perf`)
+2. Enter commit subject
+3. Optional body (press Enter to skip)
 
 > The GUI runs the same git subprocesses as the CLI, so it honours your
 > `~/.ssh/config` host aliases (e.g. `github.com-personal`).

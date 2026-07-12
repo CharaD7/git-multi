@@ -94,9 +94,12 @@ impl Config {
 
     /// Get the path to the config file
     pub fn get_config_path(repo: &Repository) -> Result<std::path::PathBuf> {
-        let repo_path = repo.path();
-        
-        Ok(repo_path.join(CONFIG_DIR).join(CONFIG_FILE))
+        // repo.workdir() returns the repo root for non-bare repos (.git is inside it).
+        // repo.path() returns the .git directory itself, which is NOT what the README documents.
+        let root = repo.workdir()
+            .unwrap_or_else(|| repo.path()); // bare repo fallback
+
+        Ok(root.join(CONFIG_DIR).join(CONFIG_FILE))
     }
 
     /// Add a remote to the config

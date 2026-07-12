@@ -473,20 +473,21 @@ fn cmd_sync(
 
 // ========== COPY ==========
 
-fn cmd_copy(from: String, to: String, files: Vec<String>, prune: bool) -> Result<()> {
+fn cmd_copy(from: String, to: Option<String>, files: Vec<String>, prune: bool) -> Result<()> {
     let repo = GitRepo::open()?;
     
     // Parse from and to specifications (format: remote:branch or just branch)
     let (from_remote, from_branch) = parse_ref_spec(&from);
-    let (to_remote, to_branch) = parse_ref_spec(&to);
+    let to_info = to.as_deref().map(parse_ref_spec);
     
     info!("Copying files from {}/{}", from_remote.as_deref().unwrap_or("local"), from_branch);
-    info!("Copying files to   {}/{}", to_remote.as_deref().unwrap_or("local"), to_branch);
+    if let Some((ref to_remote, ref to_branch)) = to_info {
+        info!("Copying files to   {}/{}", to_remote.as_deref().unwrap_or("local"), to_branch);
+    } else {
+        info!("Copying files to working directory");
+    }
     
-    // For now, implement simple file copy from one ref to working directory
-    // Full cross-remote copy would require more complex logic
-    
-    let from_ref = if let Some(remote) = &from_remote {
+    let from_ref = if let Some(ref remote) = from_remote {
         format!("refs/remotes/{}/{}", remote, from_branch)
     } else {
         from_branch

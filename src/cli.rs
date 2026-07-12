@@ -100,19 +100,19 @@ pub enum Commands {
     /// Sync content between remotes
     Sync {
         /// Source remote name
-        #[arg(value_name = "FROM_REMOTE")]
+        #[arg(long, value_name = "REMOTE")]
         from_remote: String,
         
         /// Destination remote name
-        #[arg(value_name = "TO_REMOTE")]
+        #[arg(long, value_name = "REMOTE")]
         to_remote: String,
         
         /// Source branch
-        #[arg(short, long, value_name = "BRANCH", default_value = "main")]
+        #[arg(long, value_name = "BRANCH", default_value = "main")]
         from_branch: String,
         
         /// Destination branch
-        #[arg(short, long, value_name = "BRANCH", default_value = "main")]
+        #[arg(long, value_name = "BRANCH", default_value = "main")]
         to_branch: String,
         
         /// Commit range to sync (e.g., HEAD~3..HEAD, abc123..def456)
@@ -131,15 +131,15 @@ pub enum Commands {
     /// Copy files from one remote/branch to another
     Copy {
         /// Source in format: REMOTE:BRANCH or just BRANCH (for local)
-        #[arg(value_name = "FROM")]
+        #[arg(long, value_name = "FROM")]
         from: String,
         
-        /// Destination in format: REMOTE:BRANCH or just BRANCH (for local)
-        #[arg(value_name = "TO")]
-        to: String,
+        /// Destination in format: REMOTE:BRANCH or just BRANCH (for local) (optional)
+        #[arg(long, value_name = "TO")]
+        to: Option<String>,
         
         /// Files to copy (glob patterns)
-        #[arg(value_name = "FILES", num_args = 1..)]
+        #[arg(long, value_name = "FILES", num_args = 1..)]
         files: Vec<String>,
         
         /// Delete files in destination that don't exist in source

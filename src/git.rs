@@ -90,7 +90,8 @@ impl GitRepo {
         let mut fetch_options = FetchOptions::new();
         fetch_options.prune(git2::FetchPrune::On);
         
-        remote.fetch(&["refs/heads/*:refs/remotes/*/*"] , Some(&mut fetch_options), None)?;
+        let refspec = format!("+refs/heads/*:refs/remotes/{}/*", name);
+        remote.fetch(&[&refspec], Some(&mut fetch_options), None)?;
         Ok(())
     }
 
@@ -114,7 +115,7 @@ impl GitRepo {
         let commit_obj = self.repo.find_object(commit_oid, None)?;
         
         self.repo.checkout_tree(&commit_obj, None)?;
-        self.repo.set_head_detached(commit_oid)?;
+        self.repo.set_head(&format!("refs/heads/{}", branch_name))?;
         
         Ok(())
     }
@@ -204,7 +205,8 @@ impl GitRepo {
     /// Get current branch name
     pub fn current_branch(&self) -> Result<Option<String>> {
         let head = self.repo.head()?;
-        let name = head.name().map(|s| s.to_string());
+        // Strip refs/heads/ prefix to return short branch name
+        let name = head.shorthand().map(|s| s.to_string());
         Ok(name)
     }
 

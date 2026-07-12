@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::error::{GitMultiError, Result};
-use git2::{BranchType, FetchOptions, PushOptions, Remote, Repository};
+use git2::{BranchType, Repository};
 use std::collections::HashMap;
 use std::fs;
 use std::process::Command;
@@ -59,7 +59,7 @@ impl GitRepo {
     }
 
     /// Get a git2 Remote object
-    pub fn get_remote(&self, name: &str) -> Result<Remote<'_>> {
+    pub fn get_remote(&self, name: &str) -> Result<git2::Remote<'_>> {
         self.repo.find_remote(name)
             .map_err(|_| GitMultiError::RemoteNotFound(name.to_string()))
     }
@@ -84,14 +84,23 @@ impl GitRepo {
         Ok(remotes)
     }
 
-    /// Fetch from a specific remote
+    /// Fetch from a specific remote using the system git binary
+    /// (libgit2 does not honour ~/.ssh/config Host aliases)
     pub fn fetch_remote(&self, name: &str) -> Result<()> {
-        let mut remote = self.repo.find_remote(name)?;
-        let mut fetch_options = FetchOptions::new();
-        fetch_options.prune(git2::FetchPrune::On);
-        
-        let refspec = format!("+refs/heads/*:refs/remotes/{}/*", name);
-        remote.fetch(&[&refspec], Some(&mut fetch_options), None)?;
+        let workdir = self.repo.workdir()
+            .unwrap_or_else(|| self.repo.path());
+
+        let status = Command::new("git")
+            .args(["fetch", name])
+            .current_dir(workdir)
+            .status()
+            .map_err(GitMultiError::IoError)?;
+
+        if !status.success() {
+            return Err(GitMultiError::SyncError(
+                format!("git fetch {} failed with exit code: {}", name, status.code().unwrap_or(-1))
+            ));
+        }
         Ok(())
     }
 
@@ -392,20 +401,30 @@ impl GitRepo {
         Ok(())
     }
 
-    /// Push to a specific remote
+    /// Push to a specific remote using the system git binary
+    /// (libgit2 does not honour ~/.ssh/config Host aliases)
     pub fn push_to_remote(
         &self,
         remote_name: &str,
         branch_name: Option<&str>,
     ) -> Result<()> {
-        let mut remote = self.repo.find_remote(remote_name)?;
-        let mut push_options = PushOptions::new();
-        
+        let workdir = self.repo.workdir()
+            .unwrap_or_else(|| self.repo.path());
+
         let branch = branch_name.unwrap_or("HEAD");
         let refspec = format!("refs/heads/{}:refs/heads/{}", branch, branch);
-        
-        remote.push(&[&refspec], Some(&mut push_options))?;
-        
+
+        let status = Command::new("git")
+            .args(["push", remote_name, &refspec])
+            .current_dir(workdir)
+            .status()
+            .map_err(GitMultiError::IoError)?;
+
+        if !status.success() {
+            return Err(GitMultiError::SyncError(
+                format!("git push {} failed with exit code: {}", remote_name, status.code().unwrap_or(-1))
+            ));
+        }
         Ok(())
     }
 
@@ -422,31 +441,33 @@ impl GitRepo {
         Ok(pushed)
     }
 
-    /// Pull from a specific remote
+    /// Pull from a specific remote using the system git binary
+    /// (libgit2 does not honour ~/.ssh/config Host aliases)
     pub fn pull_from_remote(
         &self,
         remote_name: &str,
         branch_name: Option<&str>,
     ) -> Result<()> {
-        self.fetch_remote(remote_name)?;
-        
-        let branch = branch_name.unwrap_or("HEAD");
-        let remote_branch = format!("refs/remotes/{}/{}", remote_name, branch);
-        
-        // Fast-forward merge
-        let remote_ref = self.repo.find_reference(&remote_branch)?;
-        let remote_oid = remote_ref.target().ok_or_else(|| {
-            GitMultiError::SyncError(format!("Remote reference {} has no target", remote_branch))
-        })?;
-        let annotated_commit = self.repo.find_annotated_commit(remote_oid)?;
-        
-        let mut merge_options = git2::MergeOptions::default();
-        merge_options.fail_on_conflict(true);
-        // Note: git2 doesn't have fastforward_only on MergeOptions directly in some versions, 
-        // usually handled by analysis before merging.
-        
-        self.repo.merge(&[&annotated_commit], Some(&mut merge_options), None)?;
-        
+        let workdir = self.repo.workdir()
+            .unwrap_or_else(|| self.repo.path());
+
+        let branch = branch_name.unwrap_or("");
+        let mut args = vec!["pull", remote_name];
+        if !branch.is_empty() {
+            args.push(branch);
+        }
+
+        let status = Command::new("git")
+            .args(&args)
+            .current_dir(workdir)
+            .status()
+            .map_err(GitMultiError::IoError)?;
+
+        if !status.success() {
+            return Err(GitMultiError::SyncError(
+                format!("git pull {} failed with exit code: {}", remote_name, status.code().unwrap_or(-1))
+            ));
+        }
         Ok(())
     }
 

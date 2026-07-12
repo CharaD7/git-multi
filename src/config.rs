@@ -65,14 +65,70 @@ impl Config {
         let config_path = Self::get_config_path(repo)?;
         
         if !config_path.exists() {
-            return Ok(Self::default());
+            let mut config = Self::default();
+            config.reconcile_with_git(repo)?;
+            return Ok(config);
         }
 
         let config_content = fs::read_to_string(&config_path)?;
-        let config: Config = toml::from_str(&config_content)
+        let mut config: Config = toml::from_str(&config_content)
             .map_err(GitMultiError::TomlDeserializeError)?;
 
+        // Keep the git-multi remote set in sync with the actual git remotes
+        // so `list-names`, the GUI list, and default-remote tracking are accurate.
+        config.reconcile_with_git(repo)?;
+
         Ok(config)
+    }
+
+    /// Add any git remotes missing from the config and drop config entries
+    /// whose git remote no longer exists. Also repairs the default remote.
+    pub fn reconcile_with_git(&mut self, repo: &Repository) -> Result<()> {
+        let git_remotes = repo.remotes()?;
+        let git_names: Vec<String> = git_remotes
+            .iter()
+            .flatten()
+            .map(|s| s.to_string())
+            .collect();
+
+        for name in &git_names {
+            if !self.remotes.contains_key(name) {
+                let url = repo
+                    .find_remote(name)
+                    .ok()
+                    .and_then(|r| r.url().map(|u| u.to_string()))
+                    .unwrap_or_default();
+                self.remotes.insert(
+                    name.clone(),
+                    RemoteConfig {
+                        url,
+                        push_url: None,
+                        fetch_refspecs: vec!["+refs/heads/*:refs/remotes/{}/*".to_string()],
+                        push_refspecs: vec!["refs/heads/*:refs/heads/*".to_string()],
+                        tags: vec![".*".to_string()],
+                        is_primary: self.remotes.is_empty(),
+                    },
+                );
+            }
+        }
+
+        // Remove config entries whose git remote no longer exists.
+        let stale: Vec<String> = self
+            .remotes
+            .keys()
+            .filter(|n| !git_names.iter().any(|g| g == *n))
+            .cloned()
+            .collect();
+        for name in stale {
+            self.remotes.remove(&name);
+        }
+
+        // Ensure the default remote still points at an existing remote.
+        if self.default_remote.as_deref().map_or(true, |d| !git_names.iter().any(|g| g == d)) {
+            self.default_remote = git_names.first().cloned();
+        }
+
+        Ok(())
     }
 
     /// Save config to the repository's .gitmulti/config.toml
@@ -196,7 +252,8 @@ impl Config {
 
 /// Initialize a new git-multi configuration in a repository
 pub fn init_config(repo: &Repository) -> Result<Config> {
-    let config = Config::default();
+    let mut config = Config::default();
+    config.reconcile_with_git(repo)?;
     config.save(repo)?;
     Ok(config)
 }

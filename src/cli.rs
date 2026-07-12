@@ -42,10 +42,18 @@ pub enum Commands {
         /// Fetch from all remotes
         #[arg(short, long)]
         all: bool,
-        
+
         /// Specific remote to fetch from
         #[arg(value_name = "REMOTE")]
         remote: Option<String>,
+
+        /// Specific branches to fetch (repeatable)
+        #[arg(long, value_name = "BRANCH", num_args = 1..)]
+        branches: Vec<String>,
+
+        /// Fetch all branches of the remote
+        #[arg(long)]
+        all_branches: bool,
     },
 
     /// Pull from remotes
@@ -53,14 +61,18 @@ pub enum Commands {
         /// Pull from all remotes
         #[arg(short, long)]
         all: bool,
-        
+
         /// Specific remote to pull from
         #[arg(value_name = "REMOTE")]
         remote: Option<String>,
-        
-        /// Branch to pull
-        #[arg(short, long, value_name = "BRANCH")]
-        branch: Option<String>,
+
+        /// Specific branches to pull (repeatable)
+        #[arg(long, value_name = "BRANCH", num_args = 1..)]
+        branches: Vec<String>,
+
+        /// Pull all branches of the remote
+        #[arg(long)]
+        all_branches: bool,
     },
 
     /// Push to remotes
@@ -68,15 +80,19 @@ pub enum Commands {
         /// Push to all remotes
         #[arg(short, long)]
         all: bool,
-        
+
         /// Specific remote to push to
         #[arg(value_name = "REMOTE")]
         remote: Option<String>,
-        
-        /// Branch to push
-        #[arg(short, long, value_name = "BRANCH")]
-        branch: Option<String>,
-        
+
+        /// Specific branches to push (repeatable)
+        #[arg(long, value_name = "BRANCH", num_args = 1..)]
+        branches: Vec<String>,
+
+        /// Push all local branches to the remote
+        #[arg(long)]
+        all_branches: bool,
+
         /// Force push
         #[arg(short, long)]
         force: bool,

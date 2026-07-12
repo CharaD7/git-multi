@@ -411,11 +411,17 @@ impl GitRepo {
         let workdir = self.repo.workdir()
             .unwrap_or_else(|| self.repo.path());
 
-        let branch = branch_name.unwrap_or("HEAD");
-        let refspec = format!("refs/heads/{}:refs/heads/{}", branch, branch);
+        // Default to the current branch when no branch is specified.
+        let branch = match branch_name {
+            Some(b) => b.to_string(),
+            None => self.current_branch()?
+                .ok_or_else(|| GitMultiError::SyncError(
+                    "Cannot determine current branch to push".to_string()
+                ))?,
+        };
 
         let status = Command::new("git")
-            .args(["push", remote_name, &refspec])
+            .args(["push", remote_name, &branch])
             .current_dir(workdir)
             .status()
             .map_err(GitMultiError::IoError)?;
@@ -451,14 +457,20 @@ impl GitRepo {
         let workdir = self.repo.workdir()
             .unwrap_or_else(|| self.repo.path());
 
-        let branch = branch_name.unwrap_or("");
-        let mut args = vec!["pull", remote_name];
+        // Default to the current branch when no branch is specified.
+        let branch = branch_name
+            .map(|b| b.to_string())
+            .or_else(|| self.current_branch().ok().flatten())
+            .unwrap_or_default();
+
+        let mut args: Vec<String> = vec!["pull".to_string(), remote_name.to_string()];
         if !branch.is_empty() {
             args.push(branch);
         }
+        let cargs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
         let status = Command::new("git")
-            .args(&args)
+            .args(&cargs)
             .current_dir(workdir)
             .status()
             .map_err(GitMultiError::IoError)?;
@@ -482,6 +494,103 @@ impl GitRepo {
         }
         
         Ok(pulled)
+    }
+
+    /// Fetch specific branches from a remote using the system git binary.
+    pub fn fetch_branches(&self, remote_name: &str, branches: &[String]) -> Result<()> {
+        if branches.is_empty() {
+            return self.fetch_remote(remote_name);
+        }
+
+        let workdir = self.repo.workdir().unwrap_or_else(|| self.repo.path());
+        let mut args: Vec<String> = vec!["fetch".to_string(), remote_name.to_string()];
+        for b in branches {
+            args.push(b.clone());
+        }
+        let cargs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+        let status = Command::new("git")
+            .args(&cargs)
+            .current_dir(workdir)
+            .status()
+            .map_err(GitMultiError::IoError)?;
+
+        if !status.success() {
+            return Err(GitMultiError::SyncError(format!(
+                "git fetch {} failed with exit code: {}",
+                remote_name,
+                status.code().unwrap_or(-1)
+            )));
+        }
+        Ok(())
+    }
+
+    /// Push specific branches to a remote using the system git binary.
+    pub fn push_branches(&self, remote_name: &str, branches: &[String], force: bool) -> Result<()> {
+        let workdir = self.repo.workdir().unwrap_or_else(|| self.repo.path());
+
+        for branch in branches {
+            let mut args: Vec<String> = vec!["push".to_string(), remote_name.to_string()];
+            if force {
+                args.push("--force".into());
+            }
+            args.push(branch.clone());
+            let cargs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+            let status = Command::new("git")
+                .args(&cargs)
+                .current_dir(workdir)
+                .status()
+                .map_err(GitMultiError::IoError)?;
+
+            if !status.success() {
+                return Err(GitMultiError::SyncError(format!(
+                    "git push {} {} failed with exit code: {}",
+                    remote_name,
+                    branch,
+                    status.code().unwrap_or(-1)
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Pull specific branches from a remote using the system git binary.
+    pub fn pull_branches(&self, remote_name: &str, branches: &[String]) -> Result<()> {
+        let workdir = self.repo.workdir().unwrap_or_else(|| self.repo.path());
+
+        for branch in branches {
+            let args: Vec<String> = vec!["pull".to_string(), remote_name.to_string(), branch.clone()];
+            let cargs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+            let status = Command::new("git")
+                .args(&cargs)
+                .current_dir(workdir)
+                .status()
+                .map_err(GitMultiError::IoError)?;
+
+            if !status.success() {
+                return Err(GitMultiError::SyncError(format!(
+                    "git pull {} {} failed with exit code: {}",
+                    remote_name,
+                    branch,
+                    status.code().unwrap_or(-1)
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// List local branch names.
+    pub fn local_branch_names(&self) -> Result<Vec<String>> {
+        let mut names = Vec::new();
+        for branch_res in self.repo.branches(Some(BranchType::Local))? {
+            let (branch, _) = branch_res?;
+            if let Some(name) = branch.name()? {
+                names.push(name.to_string());
+            }
+        }
+        Ok(names)
     }
 
     /// Copy files from one commit/branch to current working directory

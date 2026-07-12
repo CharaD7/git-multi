@@ -49,9 +49,15 @@ fn run(cli: &Cli) -> Result<()> {
             Commands::Init => cmd_init(),
             Commands::Remote { command } => cmd_remote(command),
             Commands::Branch { command } => cmd_branch(command),
-            Commands::Fetch { all, remote } => cmd_fetch(*all, remote.clone()),
-            Commands::Pull { all, remote, branch } => cmd_pull(*all, remote.clone(), branch.clone()),
-            Commands::Push { all, remote, branch, force } => cmd_push(*all, remote.clone(), branch.clone(), *force),
+            Commands::Fetch { all, remote, branches, all_branches } => {
+                cmd_fetch(*all, remote.clone(), branches.clone(), *all_branches)
+            }
+            Commands::Pull { all, remote, branches, all_branches } => {
+                cmd_pull(*all, remote.clone(), branches.clone(), *all_branches)
+            }
+            Commands::Push { all, remote, branches, all_branches, force } => {
+                cmd_push(*all, remote.clone(), branches.clone(), *all_branches, *force)
+            }
             Commands::Checkout { branch, remote, new } => cmd_checkout(branch.clone(), remote.clone(), *new),
             Commands::Sync { from_remote, to_remote, from_branch, to_branch, commits, strategy, force } => {
                 cmd_sync(from_remote.clone(), to_remote.clone(), from_branch.clone(), to_branch.clone(), 
@@ -311,7 +317,7 @@ fn cmd_branch(command: &BranchCommands) -> Result<()> {
 
 // ========== FETCH ==========
 
-fn cmd_fetch(all: bool, remote: Option<String>) -> Result<()> {
+fn cmd_fetch(all: bool, remote: Option<String>, branches: Vec<String>, all_branches: bool) -> Result<()> {
     let repo = GitRepo::open()?;
     
     if all {
@@ -321,8 +327,16 @@ fn cmd_fetch(all: bool, remote: Option<String>) -> Result<()> {
             println!("  {}", style(&name).cyan());
         }
     } else if let Some(remote_name) = remote {
-        repo.fetch_remote(&remote_name)?;
-        println!("Fetched from '{}'", style(&remote_name).green());
+        if !branches.is_empty() {
+            repo.fetch_branches(&remote_name, &branches)?;
+            println!("Fetched branches {:?} from '{}'", branches, style(&remote_name).green());
+        } else if all_branches {
+            repo.fetch_remote(&remote_name)?;
+            println!("Fetched all branches from '{}'", style(&remote_name).green());
+        } else {
+            repo.fetch_remote(&remote_name)?;
+            println!("Fetched from '{}'", style(&remote_name).green());
+        }
     } else {
         // Default: fetch from all remotes
         let fetched = repo.fetch_all()?;
@@ -333,25 +347,33 @@ fn cmd_fetch(all: bool, remote: Option<String>) -> Result<()> {
 
 // ========== PULL ==========
 
-fn cmd_pull(all: bool, remote: Option<String>, branch: Option<String>) -> Result<()> {
+fn cmd_pull(all: bool, remote: Option<String>, branches: Vec<String>, all_branches: bool) -> Result<()> {
     let repo = GitRepo::open()?;
     
     if all {
-        let pulled = repo.pull_from_all(branch.as_deref())?;
+        let pulled = repo.pull_from_all(None)?;
         println!("Pulled from {} remote(s):", style(pulled.len()).green());
         for name in pulled {
             println!("  {}", style(&name).cyan());
         }
     } else if let Some(remote_name) = remote {
-        repo.pull_from_remote(&remote_name, branch.as_deref())?;
-        println!("Pulled from '{}'", style(&remote_name).green());
-        if let Some(b) = &branch {
-            println!("  Branch: {}", b);
+        if !branches.is_empty() {
+            repo.pull_branches(&remote_name, &branches)?;
+            println!("Pulled branches {:?} from '{}'", branches, style(&remote_name).green());
+        } else if all_branches {
+            repo.fetch_remote(&remote_name)?;
+            let brs = repo.list_remote_branches(&remote_name)?;
+            repo.pull_branches(&remote_name, &brs)?;
+            println!("Pulled all branches from '{}'", style(&remote_name).green());
+        } else {
+            // Default: pull current branch
+            repo.pull_from_remote(&remote_name, None)?;
+            println!("Pulled from '{}'", style(&remote_name).green());
         }
     } else {
         // Default: pull from default remote
         if let Some(default_remote) = repo.config.get_default_remote() {
-            repo.pull_from_remote(default_remote, branch.as_deref())?;
+            repo.pull_from_remote(default_remote, None)?;
             println!("Pulled from default remote '{}'", style(default_remote).green());
         } else {
             return Err(GitMultiError::NoRemotesConfigured);
@@ -362,28 +384,38 @@ fn cmd_pull(all: bool, remote: Option<String>, branch: Option<String>) -> Result
 
 // ========== PUSH ==========
 
-fn cmd_push(all: bool, remote: Option<String>, branch: Option<String>, force: bool) -> Result<()> {
+fn cmd_push(all: bool, remote: Option<String>, branches: Vec<String>, all_branches: bool, force: bool) -> Result<()> {
     let repo = GitRepo::open()?;
     
     if all {
-        let pushed = repo.push_to_all(branch.as_deref())?;
+        let pushed = repo.push_to_all(None)?;
         println!("Pushed to {} remote(s):", style(pushed.len()).green());
         for name in pushed {
             println!("  {}", style(&name).cyan());
         }
     } else if let Some(remote_name) = remote {
-        repo.push_to_remote(&remote_name, branch.as_deref())?;
-        println!("Pushed to '{}'", style(&remote_name).green());
-        if let Some(b) = &branch {
-            println!("  Branch: {}", b);
-        }
-        if force {
-            println!("  Force: yes");
+        if !branches.is_empty() {
+            repo.push_branches(&remote_name, &branches, force)?;
+            println!("Pushed branches {:?} to '{}'", branches, style(&remote_name).green());
+            if force {
+                println!("  Force: yes");
+            }
+        } else if all_branches {
+            let brs = repo.local_branch_names()?;
+            repo.push_branches(&remote_name, &brs, force)?;
+            println!("Pushed all local branches to '{}'", style(&remote_name).green());
+            if force {
+                println!("  Force: yes");
+            }
+        } else {
+            // Default: push current branch
+            repo.push_to_remote(&remote_name, None)?;
+            println!("Pushed to '{}'", style(&remote_name).green());
         }
     } else {
         // Default: push to default remote
         if let Some(default_remote) = repo.config.get_default_remote() {
-            repo.push_to_remote(default_remote, branch.as_deref())?;
+            repo.push_to_remote(default_remote, None)?;
             println!("Pushed to default remote '{}'", style(default_remote).green());
         } else {
             return Err(GitMultiError::NoRemotesConfigured);

@@ -24,6 +24,15 @@ Launch the terminal user interface:
 ```bash
 git-multi --gui
 ```
+The GUI shows an interactive **list of remotes** (with the default marked) and, for the
+selected remote, a **list of its branches** you can multi-select. From here you can:
+- **Add a remote**: press `a`, type the remote name, press Enter, type the URL, press Enter.
+- **Switch focus** between the remotes and branches panels with `Tab` (or `←`/`→`).
+- **Select a remote / move**: use `↑`/`↓`.
+- **Multi-select branches**: focus the branches panel and press `Space` to toggle each branch.
+  With no branch selected, actions target all branches (or the current branch for push/pull).
+- **Fetch / Push / Pull** the selected remote and chosen branches: press `f` (or Enter), `p`, or `l`.
+- **Refresh** the lists with `r`, and **quit** with `q`.
 
 ### Initialization
 
@@ -81,8 +90,36 @@ git-multi copy --from dev-branch --files src/main.rs src/utils.rs
 # Fetch from all remotes
 git-multi fetch --all
 
+# Fetch from a specific remote (the current branch is used for push/pull)
+git-multi fetch upstream
+
+# Fetch specific branches from a remote
+git-multi fetch upstream --branches main dev release
+
+# Fetch every branch of a remote
+git-multi fetch upstream --all-branches
+
 # Push current branch to all remotes
 git-multi push --all
+
+# Push current branch to a specific remote
+git-multi push upstream
+
+# Push multiple branches to a specific remote
+git-multi push upstream --branches main dev
+
+# Push every local branch to a specific remote (optionally --force)
+git-multi push upstream --all-branches
+git-multi push upstream --all-branches --force
+
+# Pull into the current branch from a specific remote
+git-multi pull upstream
+
+# Pull multiple branches from a specific remote
+git-multi pull upstream --branches main dev
+
+# Pull every branch of a remote
+git-multi pull upstream --all-branches
 ```
 
 ## Configuration

@@ -61,7 +61,10 @@ fn run(cli: &Cli) -> Result<()> {
             Commands::Checkout { branch, remote, new } => cmd_checkout(branch.clone(), remote.clone(), *new),
             Commands::Sync { from_remote, to_remote, from_branch, to_branch, commits, strategy, force } => {
                 cmd_sync(from_remote.clone(), to_remote.clone(), from_branch.clone(), to_branch.clone(), 
-                       commits.clone(), *strategy, *force)
+                        commits.clone(), *strategy, *force)
+            }
+            Commands::Merge { from_remote, from_branch, to_branch, to_remote, push } => {
+                cmd_merge(from_remote.clone(), from_branch.clone(), to_branch.clone(), to_remote.clone(), *push)
             }
             Commands::Copy { from, to, files, prune } => cmd_copy(from.clone(), to.clone(), files.clone(), *prune),
             Commands::Pr { remote, base, head, title, description, open } => {
@@ -312,6 +315,12 @@ fn cmd_branch(command: &BranchCommands) -> Result<()> {
             
             Ok(())
         }
+        BranchCommands::Rename { old_name, new_name } => {
+            let repo = GitRepo::open()?;
+            repo.rename_branch(old_name, new_name)?;
+            println!("Renamed branch '{}' to '{}'", style(old_name).green(), style(new_name).green());
+            Ok(())
+        }
     }
 }
 
@@ -500,6 +509,48 @@ fn cmd_sync(
         }
     }
     
+    Ok(())
+}
+
+// ========== MERGE ==========
+
+fn cmd_merge(
+    from_remote: String,
+    from_branch: String,
+    to_branch: Option<String>,
+    to_remote: Option<String>,
+    push: bool,
+) -> Result<()> {
+    let repo = GitRepo::open()?;
+
+    let target_branch = match to_branch {
+        Some(b) => b,
+        None => repo.current_branch()?
+            .ok_or_else(|| GitMultiError::SyncError("Cannot determine current branch to merge into".to_string()))?,
+    };
+
+    let src_ref = format!("refs/remotes/{}/{}", from_remote, from_branch);
+
+    info!("Merging {}/{} into {}", from_remote, from_branch, target_branch);
+
+    repo.fetch_remote(&from_remote)?;
+    repo.checkout_branch(&target_branch)?;
+    repo.merge_and_commit(&src_ref)?;
+    println!(
+        "Merged '{}/{}' into '{}'",
+        style(&from_remote).cyan(),
+        style(&from_branch).green(),
+        style(&target_branch).green()
+    );
+
+    if push {
+        let target = to_remote.ok_or_else(|| {
+            GitMultiError::SyncError("Specify --to-remote to push the merged result".to_string())
+        })?;
+        repo.push_to_remote(&target, Some(&target_branch))?;
+        println!("Pushed '{}' to '{}'", style(&target_branch).green(), style(&target).cyan());
+    }
+
     Ok(())
 }
 

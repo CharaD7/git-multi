@@ -319,8 +319,15 @@ impl GitRepo {
     }
 
     /// Resolve a commit specification (branch name, tag, SHA, or relative ref)
+    /// using `git rev-parse`, which handles shorthands, `HEAD~n`, tags, etc.
     pub fn resolve_commit_spec(&self, spec: &str) -> Result<git2::Oid> {
-        // Try as SHA first
+        if let Ok(obj) = self.repo.revparse_single(spec) {
+            if let Ok(commit) = obj.peel_to_commit() {
+                return Ok(commit.id());
+            }
+        }
+
+        // Fallback for bare SHAs that may not peel to a commit directly.
         if spec.len() >= 7 && spec.chars().all(|c| c.is_ascii_hexdigit()) {
             if let Ok(oid) = git2::Oid::from_str(spec) {
                 if self.repo.find_object(oid, None).is_ok() {
@@ -328,37 +335,7 @@ impl GitRepo {
                 }
             }
         }
-        
-        // Try as branch name
-        if let Ok(ref_obj) = self.repo.find_reference(spec) {
-            return ref_obj.target().ok_or_else(|| {
-                GitMultiError::SyncError(format!("Reference {} has no target", spec))
-            });
-        }
-        
-        // Try relative ref (HEAD~, HEAD^, etc.)
-        if spec.starts_with("HEAD") {
-            let head = self.repo.head()?;
-            let head_commit = head.peel_to_commit()?;
-            
-            if spec == "HEAD" {
-                return Ok(head_commit.id());
-            }
-            
-            // Parse ~N or ^N
-            if let Some(n_str) = spec.strip_prefix("HEAD~") {
-                let n: usize = n_str.parse().unwrap_or(1);
-                let mut commit = head_commit;
-                for _ in 0..n {
-                    if commit.parents().len() == 0 {
-                        break;
-                    }
-                    commit = commit.parents().next().unwrap();
-                }
-                return Ok(commit.id());
-            }
-        }
-        
+
         Err(GitMultiError::SyncError(format!("Could not resolve commit spec: {}", spec)))
     }
 
@@ -591,6 +568,111 @@ impl GitRepo {
             }
         }
         Ok(names)
+    }
+
+    /// Rename a git remote in both git config and the git-multi config.
+    pub fn rename_remote(&mut self, old: &str, new: &str) -> Result<()> {
+        let remote = self.repo.find_remote(old)?;
+        let url = remote.url().unwrap_or("").to_string();
+        self.repo.remote_delete(old)?;
+        self.repo.remote(new, &url)?;
+
+        if let Some(rc) = self.config.remotes.remove(old) {
+            self.config.remotes.insert(new.to_string(), rc);
+        }
+        if self.config.get_default_remote().map_or(false, |d| d == old) {
+            self.config.set_default_remote(new.to_string())?;
+        }
+        self.config.save(&self.repo)?;
+        Ok(())
+    }
+
+    /// Rename a local branch.
+    pub fn rename_branch(&self, old: &str, new: &str) -> Result<()> {
+        let mut branch = self.repo.find_branch(old, BranchType::Local)?;
+        branch.rename(new, false)?;
+        Ok(())
+    }
+
+    /// Delete a local branch.
+    pub fn delete_local_branch(&self, name: &str, force: bool) -> Result<()> {
+        let mut branch = self.repo.find_branch(name, BranchType::Local)?;
+        branch.delete()?;
+        let _ = force;
+        Ok(())
+    }
+
+    /// Fetch a remote ref and merge it into the current branch, creating a
+    /// merge commit when the merge is clean. Used for cross-remote merges.
+    pub fn merge_and_commit(&self, src_ref: &str) -> Result<()> {
+        let reference = self.repo.find_reference(src_ref)?;
+        let oid = reference.target().ok_or_else(|| {
+            GitMultiError::SyncError(format!("Reference {} has no target", src_ref))
+        })?;
+        let src_commit = self.repo.find_commit(oid)?;
+        let annotated = self.repo.find_annotated_commit(oid)?;
+
+        let mut opts = git2::MergeOptions::default();
+        opts.fail_on_conflict(true);
+        self.repo.merge(&[&annotated], Some(&mut opts), None)?;
+
+        if self.repo.index()?.has_conflicts() {
+            return Err(GitMultiError::SyncConflict);
+        }
+
+        let signature = self.repo.signature()?;
+        let tree_oid = self.repo.index()?.write_tree()?;
+        let tree = self.repo.find_tree(tree_oid)?;
+        let head = self.head_commit()?;
+        let parents = [&head, &src_commit];
+
+        self.repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            &format!("Merge {}", src_ref),
+            &tree,
+            &parents,
+        )?;
+        Ok(())
+    }
+
+    /// Produce a human-readable status string for display.
+    pub fn status_text(&self) -> Result<String> {
+        let workdir = self.repo.workdir().unwrap_or_else(|| self.repo.path());
+
+        let mut out = String::new();
+        out.push_str("Remotes:\n");
+        for (name, url) in self.list_remotes_with_urls()? {
+            let marker = if self.config.get_default_remote().map_or(false, |d| d == &name) {
+                " [default]"
+            } else {
+                ""
+            };
+            out.push_str(&format!("  {}{}: {}\n", name, marker, url));
+        }
+
+        out.push_str("\nLocal branches:\n");
+        let info = self.list_all_branches()?;
+        for b in &info.local {
+            out.push_str(&format!("  {}{}\n", b.name, if b.is_head { " (HEAD)" } else { "" }));
+        }
+
+        out.push_str("\nWorking tree:\n");
+        let status_out = Command::new("git")
+            .args(["status", "--short"])
+            .current_dir(workdir)
+            .output()
+            .map_err(GitMultiError::IoError)?;
+        let st = String::from_utf8_lossy(&status_out.stdout);
+        if st.trim().is_empty() {
+            out.push_str("  clean\n");
+        } else {
+            for line in st.lines() {
+                out.push_str(&format!("  {}\n", line));
+            }
+        }
+        Ok(out)
     }
 
     /// Copy files from one commit/branch to current working directory

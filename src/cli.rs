@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 #[derive(Debug, Parser)]
 #[command(name = "git-multi")]
 #[command(author = "CharaD7")]
-#[command(version = "0.1.0")]
+#[command(version = "0.1.1")]
 #[command(about = "A CLI tool for managing multiple Git remotes", long_about = None)]
 pub struct Cli {
     /// Increase verbosity
@@ -190,6 +190,30 @@ pub enum Commands {
         open: bool,
     },
 
+    /// Merge a branch from one remote into the current local branch and
+    /// optionally push the result to another remote.
+    Merge {
+        /// Source remote name
+        #[arg(long, value_name = "REMOTE")]
+        from_remote: String,
+
+        /// Source branch
+        #[arg(long, value_name = "BRANCH", default_value = "main")]
+        from_branch: String,
+
+        /// Local branch to merge into (defaults to current branch)
+        #[arg(long, value_name = "BRANCH")]
+        to_branch: Option<String>,
+
+        /// Remote to push the merged result to
+        #[arg(long, value_name = "REMOTE")]
+        to_remote: Option<String>,
+
+        /// Push the merged result after a clean merge
+        #[arg(short, long)]
+        push: bool,
+    },
+
     /// Set default remote
     Use {
         /// Remote name to use as default
@@ -321,6 +345,17 @@ pub enum BranchCommands {
         #[arg(short, long)]
         checkout: bool,
         },
+
+    /// Rename a local branch
+    Rename {
+        /// Current branch name
+        #[arg(value_name = "OLD_NAME")]
+        old_name: String,
+
+        /// New branch name
+        #[arg(value_name = "NEW_NAME")]
+        new_name: String,
+    },
 }
 
 /// Sync strategy for syncing content between remotes

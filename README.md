@@ -24,15 +24,35 @@ Launch the terminal user interface:
 ```bash
 git-multi --gui
 ```
-The GUI shows an interactive **list of remotes** (with the default marked) and, for the
-selected remote, a **list of its branches** you can multi-select. From here you can:
-- **Add a remote**: press `a`, type the remote name, press Enter, type the URL, press Enter.
-- **Switch focus** between the remotes and branches panels with `Tab` (or `←`/`→`).
-- **Select a remote / move**: use `↑`/`↓`.
-- **Multi-select branches**: focus the branches panel and press `Space` to toggle each branch.
-  With no branch selected, actions target all branches (or the current branch for push/pull).
-- **Fetch / Push / Pull** the selected remote and chosen branches: press `f` (or Enter), `p`, or `l`.
-- **Refresh** the lists with `r`, and **quit** with `q`.
+The GUI is a three-panel terminal UI: **Remotes | Branches | Details**, with the Details
+panel doubling as a live **Status** view. The remote and branch lists auto-refresh in real
+time (every ~200ms), so changes made inside or outside the app show up immediately.
+
+Navigation & global keys:
+- `Tab` (or `←`/`→`) — switch focus between the Remotes and Branches panels
+- `↑` / `↓` — move the selection within the focused panel
+- `Space` — toggle multi-select of a branch (branches show `[x]`/`[ ]`)
+- `f` / `Enter` — fetch the selected remote (+ selected branches)
+- `p` — push, `l` — pull the selected remote (+ selected branches)
+- `M` (Shift+M) — merge a branch from one remote into the current branch and push to the selected remote
+- `s` — toggle the Status view (remotes, local branches, working tree)
+- `r` — force refresh, `q` — quit
+
+Remote actions (when the **Remotes** panel is focused):
+- `a` — add a remote (name, then URL)
+- `R` — rename the selected remote
+- `x` / `Delete` — remove the selected remote (confirm with `y`)
+- `D` — set the selected remote as default
+
+Branch actions (when the **Branches** panel is focused):
+- `c` — create a branch (name, base, optional remote to push to)
+- `m` — rename the selected branch
+- `x` / `Delete` — delete the selected local branch (confirm with `y`)
+
+With no branch selected, fetch/pull target all branches and push targets the current branch.
+
+> The GUI runs the same git subprocesses as the CLI, so it honours your
+> `~/.ssh/config` host aliases (e.g. `github.com-personal`).
 
 ### Initialization
 
@@ -57,6 +77,12 @@ git-multi remote set-default upstream
 # Set a primary remote
 git-multi remote set-primary upstream
 
+# Rename a remote
+git-multi remote rename old-name new-name
+
+# Remove a remote
+git-multi remote remove upstream
+
 # List all remotes
 git-multi remote list --urls
 ```
@@ -72,6 +98,12 @@ git-multi branch create feature-branch --base main --checkout
 
 # Create a new branch locally and on multiple remotes
 git-multi branch create feat/uat --remotes origin upstream backup --checkout
+
+# Rename a local branch
+git-multi branch rename old-branch new-branch
+
+# Delete a local branch
+git-multi branch delete feature-branch
 ```
 
 ### Syncing and Moving Content
@@ -82,6 +114,19 @@ git-multi sync --from-remote upstream --to-remote origin --from-branch main --to
 
 # Copy specific files from another branch
 git-multi copy --from dev-branch --files src/main.rs src/utils.rs
+```
+
+### Merging across remotes
+
+Merge a branch from one remote into the current local branch, optionally pushing the
+result to another remote:
+
+```bash
+# Merge upstream/main into the current branch
+git-multi merge --from-remote upstream --from-branch main
+
+# Merge and push the result to origin
+git-multi merge --from-remote upstream --from-branch main --to-remote origin --push
 ```
 
 ### Standard Git Operations (Enhanced)

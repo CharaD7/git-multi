@@ -17,6 +17,7 @@ const RED: Color = Color::Rgb(255, 69, 58);
 const MAUVE: Color = Color::Rgb(224, 176, 255);
 
 #[derive(Default)]
+#[allow(dead_code)]
 enum Overlay {
     #[default]
     None,
@@ -48,9 +49,6 @@ impl AppState {
         }
     }
 }
-
-// ... update run_tui and ui logic to handle overlay ...
-// (I will continue with this in subsequent steps)
 
 pub fn run_tui() -> io::Result<()> {
     let mut terminal = ratatui::init();

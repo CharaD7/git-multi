@@ -47,6 +47,12 @@ pub enum GitMultiError {
 
     #[error("User cancelled operation")]
     UserCancelled,
+
+    #[error("Detached HEAD or no commits found")]
+    NoCommits,
+
+    #[error("Operation requires a valid file path")]
+    NoFile,
 }
 
 pub type Result<T> = std::result::Result<T, GitMultiError>;

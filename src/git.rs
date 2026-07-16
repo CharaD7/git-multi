@@ -729,32 +729,22 @@ impl GitRepo {
 
     /// Create a commit with optional body. Stages all changes first.
     pub fn create_commit(&self, subject: &str, body: Option<&str>) -> Result<()> {
-        let workdir = self.repo.workdir().unwrap_or_else(|| self.repo.path());
-        
-        // Stage all changes
-        let status = Command::new("git")
-            .args(["add", "-A"])
-            .current_dir(workdir)
-            .status()
-            .map_err(GitMultiError::IoError)?;
-        
-        if !status.success() {
-            return Err(GitMultiError::SyncError("git add failed".to_string()));
-        }
-        
-        // Create commit using git CLI
+        // Stage all changes (delegates to git so it honours .gitignore etc.)
+        self.stage_file(".")?;
+
         let full_msg = if let Some(b) = body {
             format!("{}\n\n{}", subject, b)
         } else {
             subject.to_string()
         };
-        
+
+        let workdir = self.workdir();
         let status = Command::new("git")
             .args(["commit", "-m", &full_msg])
             .current_dir(workdir)
             .status()
             .map_err(GitMultiError::IoError)?;
-        
+
         if !status.success() {
             return Err(GitMultiError::SyncError(
                 format!("git commit failed with exit code: {}", status.code().unwrap_or(-1))
@@ -765,17 +755,697 @@ impl GitRepo {
 
     /// List recent commits for display
     pub fn list_recent_commits(&self, count: usize) -> Result<Vec<String>> {
-        let workdir = self.repo.workdir().unwrap_or_else(|| self.repo.path());
-        
+        let workdir = self.repo.workdir()
+            .unwrap_or_else(|| self.repo.path());
+
         let status = Command::new("git")
             .args(["log", "-n", &count.to_string(), "--oneline", "--decorate"])
             .current_dir(workdir)
             .output()
             .map_err(GitMultiError::IoError)?;
-        
+
         let out = String::from_utf8_lossy(&status.stdout);
         Ok(out.lines().map(|l| l.to_string()).collect())
     }
+
+    // ========================================================================
+    // Working-tree status & granular staging
+    // ========================================================================
+
+    /// Every file with a changed status, with its two-letter git status code.
+    pub fn working_status(&self) -> Result<Vec<FileStatus>> {
+        let statuses = self.repo.statuses(None)?;
+        let mut entries: Vec<_> = statuses.iter().collect();
+        entries.sort_by_key(|s| {
+            s.path()
+                .map(|p| p.to_string())
+                .unwrap_or_default()
+        });
+        let mut out = Vec::new();
+        for s in entries {
+            let Some(path) = s.path().map(|p| p.to_string()) else {
+                continue;
+            };
+            let (staged, unstaged) = status_codes(s.status());
+            out.push(FileStatus {
+                path,
+                staged,
+                unstaged,
+                in_index: s.status().contains(git2::Status::INDEX_NEW)
+                    || s.status().contains(git2::Status::INDEX_MODIFIED)
+                    || s.status().contains(git2::Status::INDEX_DELETED)
+                    || s.status().contains(git2::Status::INDEX_RENAMED)
+                    || s.status().contains(git2::Status::INDEX_TYPECHANGE),
+                in_workdir: s.status().contains(git2::Status::WT_NEW)
+                    || s.status().contains(git2::Status::WT_MODIFIED)
+                    || s.status().contains(git2::Status::WT_DELETED)
+                    || s.status().contains(git2::Status::WT_TYPECHANGE)
+                    || s.status().contains(git2::Status::WT_RENAMED),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Stage a single file (or all with ".").
+    pub fn stage_file(&self, path: &str) -> Result<()> {
+        let workdir = self.workdir();
+        let status = Command::new("git")
+            .args(["add", "--", path])
+            .current_dir(workdir)
+            .status()
+            .map_err(GitMultiError::IoError)?;
+        if !status.success() {
+            return Err(GitMultiError::SyncError(format!("git add {} failed", path)));
+        }
+        Ok(())
+    }
+
+    /// Unstage a single file (reset its entry out of the index, keeping the
+    /// working-tree contents).
+    pub fn unstage_file(&self, path: &str) -> Result<()> {
+        let workdir = self.workdir();
+        let status = Command::new("git")
+            .args(["restore", "--staged", "--", path])
+            .current_dir(workdir)
+            .status()
+            .map_err(GitMultiError::IoError)?;
+        if !status.success() {
+            return Err(GitMultiError::SyncError(format!(
+                "git restore --staged {} failed",
+                path
+            )));
+        }
+        Ok(())
+    }
+
+    /// Discard working-tree changes for a single file (restore from index/HEAD).
+    pub fn restore_file(&self, path: &str) -> Result<()> {
+        let workdir = self.workdir();
+        let status = Command::new("git")
+            .args(["restore", "--", path])
+            .current_dir(workdir)
+            .status()
+            .map_err(GitMultiError::IoError)?;
+        if !status.success() {
+            return Err(GitMultiError::SyncError(format!("git restore {} failed", path)));
+        }
+        Ok(())
+    }
+
+    // ========================================================================
+    // Diffs
+    // ========================================================================
+
+    /// A unified diff according to `mode`.
+    pub fn diff(&self, mode: DiffMode, pathspec: Option<&str>) -> Result<String> {
+        let workdir = self.workdir();
+        let mut args: Vec<String> = vec!["diff".to_string()];
+        match mode {
+            DiffMode::Staged => args.push("--cached".to_string()),
+            DiffMode::Unstaged => {}
+            DiffMode::Head => args.push("HEAD".to_string()),
+        }
+        if let Some(p) = pathspec {
+            args.push("--".to_string());
+            args.push(p.to_string());
+        }
+        let cargs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let out = Command::new("git")
+            .args(&cargs)
+            .current_dir(workdir)
+            .output()
+            .map_err(GitMultiError::IoError)?;
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    }
+
+    /// Line-level diff hunks for a single file in the given mode (used by the
+    /// GUI blame/diff panels). Returns (old_lines, new_lines) tuples keyed by
+    /// line content so callers can highlight.
+    pub fn diff_lines(&self, mode: DiffMode, path: &str) -> Result<Vec<DiffLineEntry>> {
+        let workdir = self.workdir();
+        let mut args: Vec<String> = vec!["diff".to_string()];
+        match mode {
+            DiffMode::Staged => args.push("--cached".to_string()),
+            DiffMode::Unstaged => {}
+            DiffMode::Head => args.push("HEAD".to_string()),
+        }
+        args.push("--".to_string());
+        args.push(path.to_string());
+        let cargs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let out = Command::new("git")
+            .args(&cargs)
+            .current_dir(workdir)
+            .output()
+            .map_err(GitMultiError::IoError)?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        Ok(parse_diff_lines(&text))
+    }
+
+    // ========================================================================
+    // Amend / revert / reset
+    // ========================================================================
+
+    /// Amend the last commit with the given message. Stages everything first.
+    pub fn amend_commit(&self, subject: &str, body: Option<&str>) -> Result<()> {
+        let workdir = self.workdir();
+        self.stage_file(".")?;
+        let full_msg = match body {
+            Some(b) => format!("{}\n\n{}", subject, b),
+            None => subject.to_string(),
+        };
+        let status = Command::new("git")
+            .args(["commit", "--amend", "-m", &full_msg])
+            .current_dir(workdir)
+            .status()
+            .map_err(GitMultiError::IoError)?;
+        if !status.success() {
+            return Err(GitMultiError::SyncError("git commit --amend failed".to_string()));
+        }
+        Ok(())
+    }
+
+    /// Create a new commit that reverts the given commit (uses `git revert`).
+    pub fn revert_commit(&self, commit_spec: &str) -> Result<()> {
+        let workdir = self.workdir();
+        let status = Command::new("git")
+            .args(["revert", "--no-edit", commit_spec])
+            .current_dir(workdir)
+            .status()
+            .map_err(GitMultiError::IoError)?;
+        if !status.success() {
+            return Err(GitMultiError::SyncError(format!(
+                "git revert {} failed",
+                commit_spec
+            )));
+        }
+        Ok(())
+    }
+
+    /// Reset the current branch. `soft` keeps index+workdir, `mixed` keeps
+    /// workdir, `hard` discards everything (use with care — handled by caller).
+    pub fn reset(&self, mode: ResetMode, commit_spec: &str) -> Result<()> {
+        let workdir = self.workdir();
+        let flag = match mode {
+            ResetMode::Soft => "--soft",
+            ResetMode::Mixed => "--mixed",
+            ResetMode::Hard => "--hard",
+        };
+        let status = Command::new("git")
+            .args(["reset", flag, commit_spec])
+            .current_dir(workdir)
+            .status()
+            .map_err(GitMultiError::IoError)?;
+        if !status.success() {
+            return Err(GitMultiError::SyncError(format!(
+                "git reset {} {} failed",
+                flag, commit_spec
+            )));
+        }
+        Ok(())
+    }
+
+    // ========================================================================
+    // GitLens: blame
+    // ========================================================================
+
+    /// Blame a file, returning one entry per line.
+    pub fn blame_file(&self, path: &str, commit_spec: Option<&str>) -> Result<Vec<BlameLine>> {
+        let repo_path = self.repo.workdir().unwrap_or_else(|| self.repo.path());
+        let abspath = repo_path.join(path);
+        if !abspath.exists() {
+            // Try to blame the blob at HEAD if the file is deleted.
+            let tree = self.head_commit()?.tree()?;
+            if let Some(entry) = tree.get_name(path) {
+                let blob = entry.to_object(&self.repo)?.peel_to_blob()?;
+                let content = String::from_utf8_lossy(blob.content());
+                return Ok(content
+                    .lines()
+                    .enumerate()
+                    .map(|(i, _)| BlameLine {
+                        line: i + 1,
+                        commit: String::new(),
+                        author: String::new(),
+                        date: String::new(),
+                        summary: String::new(),
+                        final_line: i + 1,
+                    })
+                    .collect());
+            }
+            return Ok(Vec::new());
+        }
+
+        let mut opts = git2::BlameOptions::new();
+        if let Some(spec) = commit_spec {
+            let oid = self.resolve_commit_spec(spec)?;
+            opts.newest_commit(oid);
+        }
+        let blame = self.repo.blame_file(std::path::Path::new(path), Some(&mut opts))?;
+        let mut out = Vec::new();
+        for hunk in blame.iter() {
+            let commit = hunk.final_commit_id();
+            let sig = hunk.final_signature();
+            let summary = self
+                .repo
+                .find_commit(commit)
+                .ok()
+                .and_then(|c| c.summary().map(|s| s.to_string()))
+                .unwrap_or_default();
+            let when = sig.when();
+            let date = format!("{}", when.seconds());
+            let count = hunk.lines_in_hunk();
+            let author = sig.name().unwrap_or("").to_string();
+            for i in 0..count {
+                out.push(BlameLine {
+                    line: hunk.final_start_line() + i,
+                    commit: commit.to_string(),
+                    author: author.clone(),
+                    date: date.clone(),
+                    summary: summary.clone(),
+                    final_line: hunk.final_start_line() + i,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Commits that touched a file (GitLens "file history"), newest first.
+    pub fn file_history(&self, path: &str) -> Result<Vec<CommitSummary>> {
+        let workdir = self.workdir();
+        let out = Command::new("git")
+            .args([
+                "log",
+                "--follow",
+                "--format=%H%x00%an%x00%aI%x00%s",
+                "--",
+                path,
+            ])
+            .current_dir(workdir)
+            .output()
+            .map_err(GitMultiError::IoError)?;
+        Ok(parse_log_null_sep(&String::from_utf8_lossy(&out.stdout)))
+    }
+
+    /// Line history for a single file (GitLens "line history"), newest first.
+    pub fn line_history(&self, path: &str, line: usize) -> Result<Vec<CommitSummary>> {
+        let workdir = self.workdir();
+        let out = Command::new("git")
+            .args([
+                "-c",
+                "core.pager=cat",
+                "log",
+                "-L",
+                &format!("{},{}:{}", line, line, path),
+                "--format=%H%x00%an%x00%aI%x00%s",
+            ])
+            .current_dir(workdir)
+            .output()
+            .map_err(GitMultiError::IoError)?;
+        Ok(parse_log_null_sep(&String::from_utf8_lossy(&out.stdout)))
+    }
+
+    // ========================================================================
+    // GitGraph: commit DAG
+    // ========================================================================
+
+    /// Build a commit graph reachable from HEAD (or `--all` refs) with
+    /// branch/ref labels per commit.
+    pub fn commit_graph(&self, all: bool, limit: usize) -> Result<CommitGraph> {
+        let mut walk = self.repo.revwalk()?;
+        walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)?;
+        if all {
+            walk.push_glob("refs/heads/*")?;
+            walk.push_glob("refs/remotes/*")?;
+            if self.repo.head().is_ok() {
+                let _ = walk.push_head();
+            }
+        } else if let Ok(head) = self.repo.head() {
+            walk.push_head()?;
+            let _ = head;
+        } else {
+            return Err(GitMultiError::SyncError("No HEAD; cannot graph".to_string()));
+        }
+
+        let ref_labels = self.collect_ref_labels()?;
+
+        let mut nodes: Vec<CommitNode> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for oid in walk {
+            let oid = match oid {
+                Ok(o) => o,
+                Err(_) => continue,
+            };
+            if !seen.insert(oid) {
+                continue;
+            }
+            let Ok(commit) = self.repo.find_commit(oid) else {
+                continue;
+            };
+            let parents: Vec<String> = commit
+                .parent_ids()
+                .map(|p| p.to_string())
+                .collect();
+            let author = commit.author();
+            let node = CommitNode {
+                id: oid.to_string(),
+                short_id: oid.to_string()[..8.min(oid.to_string().len())].to_string(),
+                message: commit.summary().unwrap_or("").to_string(),
+                author: author.name().unwrap_or("").to_string(),
+                date: author.when().seconds(),
+                parents,
+                refs: ref_labels.get(&oid.to_string()).cloned().unwrap_or_default(),
+            };
+            nodes.push(node);
+            if nodes.len() >= limit {
+                break;
+            }
+        }
+
+        // Refs that are not on a visited commit (e.g. detached or beyond limit).
+        let mut detached: Vec<RefLabel> = ref_labels
+            .values()
+            .flatten()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        detached.sort_by(|a, b| a.name.cmp(&b.name));
+
+        Ok(CommitGraph { nodes, detached_refs: detached })
+    }
+
+    /// Full commit metadata for a single commit (used by graph/detail views).
+    pub fn commit_detail(&self, commit_spec: &str) -> Result<CommitSummary> {
+        let oid = self.resolve_commit_spec(commit_spec)?;
+        let commit = self.repo.find_commit(oid)?;
+        let author = commit.author();
+        let committer = commit.committer();
+        Ok(CommitSummary {
+            id: oid.to_string(),
+            short_id: oid.to_string()[..8.min(oid.to_string().len())].to_string(),
+            author: author.name().unwrap_or("").to_string(),
+            author_email: author.email().unwrap_or("").to_string(),
+            author_date: author.when().seconds(),
+            committer: committer.name().unwrap_or("").to_string(),
+            committer_date: committer.when().seconds(),
+            message: commit.message().unwrap_or("").to_string(),
+            parents: commit.parent_ids().map(|p| p.to_string()).collect(),
+        })
+    }
+
+    /// Cherry-pick a single commit onto the current HEAD (interactive pick).
+    pub fn cherry_pick_commit(&self, commit_spec: &str) -> Result<()> {
+        let oid = self.resolve_commit_spec(commit_spec)?;
+        let commit = self.repo.find_commit(oid)?;
+        let mut opts = git2::CherrypickOptions::new();
+        self.repo.cherrypick(&commit, Some(&mut opts))?;
+        if self.repo.index()?.has_conflicts() {
+            return Err(GitMultiError::SyncConflict);
+        }
+        let tree_oid = self.repo.index()?.write_tree()?;
+        let tree = self.repo.find_tree(tree_oid)?;
+        let parent = self.head_commit()?;
+        let parents = [&parent];
+        let sig = self.repo.signature()?;
+        self.repo.commit(
+            Some("HEAD"),
+            &sig,
+            &sig,
+            &format!("Cherry-pick: {}", commit.summary().unwrap_or("")),
+            &tree,
+            &parents,
+        )?;
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------------
+    // helpers
+    // ------------------------------------------------------------------------
+
+    fn workdir(&self) -> &std::path::Path {
+        self.repo.workdir().unwrap_or_else(|| self.repo.path())
+    }
+
+    fn collect_ref_labels(&self) -> Result<HashMap<String, Vec<RefLabel>>> {
+        let mut map: HashMap<String, Vec<RefLabel>> = HashMap::new();
+        let head = self.repo.head().ok();
+        let head_oid = head.as_ref().and_then(|h| h.target());
+
+        let refs = self.repo.references()?;
+        let mut riter = refs.into_iter();
+        while let Some(r) = riter.next() {
+            let Ok(r) = r else { continue };
+            let Some(name) = r.name() else { continue };
+            let is_remote = r.is_remote();
+            let Some(target) = r.target() else { continue };
+            let short = name
+                .rsplit("refs/")
+                .next()
+                .unwrap_or(name)
+                .to_string();
+            let kind = if name.starts_with("refs/heads/") {
+                RefKind::Local
+            } else if is_remote {
+                RefKind::Remote
+            } else if name.starts_with("refs/tags/") {
+                RefKind::Tag
+            } else {
+                RefKind::Other
+            };
+            let label = RefLabel {
+                name: short,
+                kind,
+                is_head: head_oid == Some(target),
+            };
+            map.entry(target.to_string()).or_default().push(label);
+        }
+        Ok(map)
+    }
+}
+
+/// Two-letter git status code (staged, unstaged).
+fn status_codes(status: git2::Status) -> (char, char) {
+    let staged = if status.contains(git2::Status::INDEX_NEW) {
+        'A'
+    } else if status.contains(git2::Status::INDEX_MODIFIED) {
+        'M'
+    } else if status.contains(git2::Status::INDEX_DELETED) {
+        'D'
+    } else if status.contains(git2::Status::INDEX_RENAMED) {
+        'R'
+    } else if status.contains(git2::Status::INDEX_TYPECHANGE) {
+        'T'
+    } else {
+        ' '
+    };
+    let unstaged = if status.contains(git2::Status::WT_NEW) {
+        if staged == ' ' {
+            '?'
+        } else {
+            ' '
+        }
+    } else if status.contains(git2::Status::WT_MODIFIED) {
+        'M'
+    } else if status.contains(git2::Status::WT_DELETED) {
+        'D'
+    } else if status.contains(git2::Status::WT_RENAMED) {
+        'R'
+    } else if status.contains(git2::Status::WT_TYPECHANGE) {
+        'T'
+    } else {
+        ' '
+    };
+    (staged, unstaged)
+}
+
+fn parse_log_null_sep(text: &str) -> Vec<CommitSummary> {
+    // `git log` emits records as `id\0author\0date\0summary` with NO trailing
+    // separator, so splitting on NUL yields individual fields. Group them in
+    // fours.
+    let fields: Vec<&str> = text.split('\0').filter(|s| !s.is_empty()).collect();
+    let mut out = Vec::new();
+    for chunk in fields.chunks_exact(4) {
+        let id = chunk[0].to_string();
+        out.push(CommitSummary {
+            id: id.clone(),
+            short_id: id[..8.min(id.len())].to_string(),
+            author: chunk[1].to_string(),
+            author_email: String::new(),
+            author_date: parse_iso_date(chunk[2]),
+            committer: String::new(),
+            committer_date: 0,
+            message: chunk[3].to_string(),
+            parents: Vec::new(),
+        });
+    }
+    out
+}
+
+fn parse_iso_date(s: &str) -> i64 {
+    // ISO-8601 like 2024-01-02T03:04:05+00:00 -> best-effort epoch seconds.
+    chrono_parse(s).unwrap_or(0)
+}
+
+fn chrono_parse(_s: &str) -> Option<i64> {
+    // Avoid adding a chrono dependency; return None and let callers fall back
+    // to displaying the raw string where needed. Kept as a seam for later.
+    None
+}
+
+/// Best-effort parse of a unified diff into per-line entries for highlighting.
+fn parse_diff_lines(text: &str) -> Vec<DiffLineEntry> {
+    let mut out = Vec::new();
+    let mut old_line = 0i64;
+    let mut new_line = 0i64;
+    for line in text.lines() {
+        if line.starts_with("@@") {
+            if let Some(caps) = parse_hunk_header(line) {
+                old_line = caps.0 as i64 - 1;
+                new_line = caps.1 as i64 - 1;
+            }
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("+") {
+            new_line += 1;
+            out.push(DiffLineEntry {
+                old_line: 0,
+                new_line,
+                origin: '+',
+                content: rest.to_string(),
+            });
+        } else if let Some(rest) = line.strip_prefix("-") {
+            old_line += 1;
+            out.push(DiffLineEntry {
+                old_line,
+                new_line: 0,
+                origin: '-',
+                content: rest.to_string(),
+            });
+        } else if let Some(rest) = line.strip_prefix(" ") {
+            old_line += 1;
+            new_line += 1;
+            out.push(DiffLineEntry {
+                old_line,
+                new_line,
+                origin: ' ',
+                content: rest.to_string(),
+            });
+        } else if let Some(rest) = line.strip_prefix("\\") {
+            out.push(DiffLineEntry {
+                old_line: 0,
+                new_line: 0,
+                origin: '\\',
+                content: rest.to_string(),
+            });
+        }
+    }
+    out
+}
+
+fn parse_hunk_header(line: &str) -> Option<(usize, usize)> {
+    // @@ -old,count +new,count @@
+    let inner = line.trim_start_matches("@@").trim_end_matches("@@").trim();
+    let mut parts = inner.split_whitespace();
+    let old = parts.next()?.trim_start_matches('-');
+    let new = parts.next()?.trim_start_matches('+');
+    let old_start = old.split(',').next()?.parse().ok()?;
+    let new_start = new.split(',').next()?.parse().ok()?;
+    Some((old_start, new_start))
+}
+
+/// What to diff against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffMode {
+    Staged,
+    Unstaged,
+    Head,
+}
+
+/// Reset style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResetMode {
+    Soft,
+    Mixed,
+    Hard,
+}
+
+/// A changed file in the working tree.
+#[derive(Debug, Clone)]
+pub struct FileStatus {
+    pub path: String,
+    pub staged: char,
+    pub unstaged: char,
+    pub in_index: bool,
+    pub in_workdir: bool,
+}
+
+/// A line of blame output.
+#[derive(Debug, Clone)]
+pub struct BlameLine {
+    pub line: usize,
+    pub commit: String,
+    pub author: String,
+    pub date: String,
+    pub summary: String,
+    pub final_line: usize,
+}
+
+/// A line in a unified diff.
+#[derive(Debug, Clone)]
+pub struct DiffLineEntry {
+    pub old_line: i64,
+    pub new_line: i64,
+    pub origin: char,
+    pub content: String,
+}
+
+/// Summary metadata for a commit.
+#[derive(Debug, Clone, Default)]
+pub struct CommitSummary {
+    pub id: String,
+    pub short_id: String,
+    pub author: String,
+    pub author_email: String,
+    pub author_date: i64,
+    pub committer: String,
+    pub committer_date: i64,
+    pub message: String,
+    pub parents: Vec<String>,
+}
+
+/// A node in the commit DAG.
+#[derive(Debug, Clone)]
+pub struct CommitNode {
+    pub id: String,
+    pub short_id: String,
+    pub message: String,
+    pub author: String,
+    pub date: i64,
+    pub parents: Vec<String>,
+    pub refs: Vec<RefLabel>,
+}
+
+/// A ref (branch/tag/remote) pointing at a commit.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RefLabel {
+    pub name: String,
+    pub kind: RefKind,
+    pub is_head: bool,
+}
+
+/// Kind of ref.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RefKind {
+    Local,
+    Remote,
+    Tag,
+    Other,
+}
+
+/// A commit graph and any detached refs.
+#[derive(Debug, Clone)]
+pub struct CommitGraph {
+    pub nodes: Vec<CommitNode>,
+    pub detached_refs: Vec<RefLabel>,
 }
 
 /// Information about branches

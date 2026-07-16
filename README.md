@@ -10,6 +10,14 @@ A CLI tool for managing multiple Git remotes and syncing content between them. `
 - **File Portability:** Copy specific files between different branches or remotes without full merges.
 - **PR Integration:** Quick Pull Request creation using the `gh` CLI.
 - **Default Remotes:** Set a default remote for streamlined commands.
+- **Full Git Coverage:** commit & amend, granular stage/unstage, revert, reset (soft/mixed/hard),
+  and cherry-pick — available both in the CLI and the GUI.
+- **GitLens in the GUI:** per-line blame with author/commit/date, plus file history, so you can
+  see who changed what and when without leaving the terminal.
+- **Git Graph in the GUI:** an interactive commit DAG with branch/tag/remote ref labels, reachable
+  from HEAD or all refs, with one-key cherry-pick of any commit.
+- **Diffs everywhere:** unified diffs of staged / unstaged / HEAD changes, for the whole tree or a
+  single file, in both CLI and GUI.
 
 ## Installation
 
@@ -31,20 +39,26 @@ Launch the terminal user interface:
 ```bash
 git-multi --gui
 ```
-The GUI is a three-panel terminal UI: **Remotes | Branches | Details**, with the Details
-panel doubling as a live **Status** view. The remote and branch lists auto-refresh in real
-time (every ~200ms), so changes made inside or outside the app show up immediately.
+The GUI is a five-panel terminal UI: **Remotes | Branches | Files | Detail**, with an
+interactive **Git Graph** mode. The remote, branch, and file lists auto-refresh on demand
+(`r`), so changes made inside or outside the app show up when you refresh.
 
 Navigation & global keys:
-- `Tab` (or `←`/`→`) — switch focus between the Remotes and Branches panels
+- `Tab` (or `←`/`→`) — cycle focus: Remotes → Branches → Files → Detail → Graph
 - `↑` / `↓` — move the selection within the focused panel
 - `Space` — toggle multi-select of a branch (branches show `[x]`/`[ ]`)
 - `f` / `Enter` — fetch the selected remote (+ selected branches)
 - `p` — push, `l` — pull the selected remote (+ selected branches)
 - `M` — merge across remotes (4-step flow: source remote, source branch, dest remote, dest branch)
-- `v` — toggle Commits view in the Details panel
 - `C` — create a commit (select type, enter subject, optional body)
-- `s` — toggle the Status view (remotes, local branches, working tree)
+- `A` — amend the last commit (enter a new message)
+- `R` — revert a commit (enter a sha/ref)
+- `Z` — reset current branch (soft/mixed/hard, then a target)
+- `P` — cherry-pick a single commit onto HEAD
+- `g` — Git Graph (commit DAG with branch/tag/remote labels; `a` toggles all-refs; `Enter` cherry-picks the selected commit)
+- `b` — Blame the selected file (GitLens: author, commit, date per line)
+- `d` — Diff (unstaged), `F` — Files panel, `s` — Status view, `v` — Commits view
+- `S` — on a file: stage if unstaged, unstage if staged
 - `r` — force refresh, `q` — quit
 
 Remote actions (when the **Remotes** panel is focused):
@@ -188,6 +202,59 @@ git-multi pull upstream --branches main dev
 # Pull every branch of a remote
 git-multi pull upstream --all-branches
 ```
+
+### Committing, staging, and history
+
+```bash
+# Create a commit (stages all changes, then commits)
+git-multi commit "feat: add retry logic"
+
+# Create a commit with a body
+git-multi commit "fix: null deref" --body "Guard the optional before unwrap."
+
+# Amend the previous commit
+git-multi commit "fix: null deref (amended)" --amend
+
+# Stage / unstage individual files
+git-multi stage src/main.rs          # not yet exposed as a subcommand; use the GUI (S) or `git`
+git-multi unstage src/main.rs
+
+# Diffs
+git-multi diff unstaged              # working tree vs index
+git-multi diff staged                # index vs HEAD
+git-multi diff head                  # working tree vs HEAD
+git-multi diff unstaged src/main.rs
+
+# Revert / reset / cherry-pick
+git-multi revert a1b2c3d4
+git-multi reset mixed HEAD~1
+git-multi reset hard a1b2c3d4
+git-multi pick a1b2c3d4              # cherry-pick a single commit
+```
+
+### GitLens (blame & file history)
+
+```bash
+# Per-line blame for a file (author, commit, date, summary)
+git-multi blame src/main.rs
+git-multi blame src/main.rs --commit HEAD~2
+
+# File history (commits that touched a file)
+git-multi log src/main.rs
+```
+
+### Git Graph
+
+```bash
+# Commit DAG from HEAD
+git-multi graph --limit 50
+
+# Commit DAG including all branches and remote refs (with labels)
+git-multi graph --all --limit 200
+```
+
+All of the above (plus granular stage/unstage, amend, revert, reset, and cherry-pick) are
+also available directly inside the GUI — see [GUI Mode](#gui-mode).
 
 ## Configuration
 

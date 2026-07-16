@@ -226,6 +226,111 @@ pub enum Commands {
 
     /// List all remotes with their branches
     List,
+
+    /// Create a commit with message (subject + optional body)
+    Commit {
+        /// Commit subject
+        #[arg(value_name = "SUBJECT")]
+        subject: String,
+
+        /// Optional commit body
+        #[arg(short, long, value_name = "BODY")]
+        body: Option<String>,
+
+        /// Amend the previous commit instead of creating a new one
+        #[arg(short, long)]
+        amend: bool,
+    },
+
+    /// Show a diff (staged, unstaged, or against HEAD)
+    Diff {
+        /// What to diff against
+        #[arg(value_name = "WHAT", default_value = "unstaged")]
+        what: String,
+
+        /// Restrict to a path
+        #[arg(value_name = "PATH")]
+        path: Option<String>,
+    },
+
+    /// Show GitLens-style blame for a file
+    Blame {
+        /// File to blame
+        #[arg(value_name = "PATH")]
+        path: String,
+
+        /// Blame at this commit instead of the working tree
+        #[arg(short, long, value_name = "COMMIT")]
+        commit: Option<String>,
+    },
+
+    /// Show GitLens-style file history
+    Log {
+        /// File to show history for (defaults to full repo log)
+        #[arg(value_name = "PATH")]
+        path: Option<String>,
+
+        /// Number of entries
+        #[arg(short, long, default_value_t = 20)]
+        count: usize,
+    },
+
+    /// Show the commit DAG (Git Graph)
+    Graph {
+        /// Include all refs (branches + remotes), not just HEAD
+        #[arg(short, long)]
+        all: bool,
+
+        /// Maximum number of commits to show
+        #[arg(short, long, default_value_t = 100)]
+        limit: usize,
+    },
+
+    /// Revert a commit by creating a new revert commit
+    Revert {
+        /// Commit to revert (sha or ref)
+        #[arg(value_name = "COMMIT")]
+        commit: String,
+    },
+
+    /// Reset the current branch
+    Reset {
+        /// Reset mode: soft | mixed | hard
+        #[arg(value_name = "MODE", default_value = "mixed")]
+        mode: String,
+
+        /// Target (sha or ref, defaults to HEAD)
+        #[arg(value_name = "TARGET", default_value = "HEAD")]
+        target: String,
+    },
+
+    /// Cherry-pick a single commit onto the current HEAD
+    Pick {
+        /// Commit to cherry-pick (sha or ref)
+        #[arg(value_name = "COMMIT")]
+        commit: String,
+    },
+
+    /// Stage a file (or all changes with ".")
+    Stage {
+        /// Path to stage (use "." for everything)
+        #[arg(value_name = "PATH", default_value = ".")]
+        path: String,
+    },
+
+    /// Unstage a file (keep working-tree contents)
+    Unstage {
+        /// Path to unstage
+        #[arg(value_name = "PATH")]
+        path: String,
+    },
+
+    /// Discard working-tree changes for a file (restore from index/HEAD)
+    Restore {
+        /// Path to restore
+        #[arg(value_name = "PATH")]
+        path: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]

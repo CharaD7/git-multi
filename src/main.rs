@@ -73,6 +73,29 @@ fn run(cli: &Cli) -> Result<()> {
             Commands::Use { remote } => cmd_use(remote.clone()),
             Commands::Status => cmd_status(),
             Commands::List => cmd_list(),
+            Commands::Commit { subject, body, amend } => cmd_commit(subject.clone(), body.clone(), *amend),
+            Commands::Diff { what, path } => cmd_diff(what.clone(), path.clone()),
+            Commands::Blame { path, commit } => cmd_blame(path.clone(), commit.clone()),
+            Commands::Log { path, count } => cmd_log(path.clone(), *count),
+            Commands::Graph { all, limit } => cmd_graph(*all, *limit),
+            Commands::Revert { commit } => cmd_revert(commit.clone()),
+            Commands::Reset { mode, target } => cmd_reset(mode.clone(), target.clone()),
+            Commands::Pick { commit } => cmd_pick(commit.clone()),
+            Commands::Stage { path } => {
+                GitRepo::open()?.stage_file(&path)?;
+                println!("{}", style(format!("Staged: {}", path)).green());
+                Ok(())
+            }
+            Commands::Unstage { path } => {
+                GitRepo::open()?.unstage_file(&path)?;
+                println!("{}", style(format!("Unstaged: {}", path)).green());
+                Ok(())
+            }
+            Commands::Restore { path } => {
+                GitRepo::open()?.restore_file(&path)?;
+                println!("{}", style(format!("Restored: {}", path)).green());
+                Ok(())
+            }
         }
     } else {
         println!("No command specified. Use --help for usage.");
@@ -698,5 +721,118 @@ fn cmd_list() -> Result<()> {
         }
     }
     
+    Ok(())
+}
+
+// ========== COMMIT / AMEND ==========
+
+fn cmd_commit(subject: String, body: Option<String>, amend: bool) -> Result<()> {
+    let repo = GitRepo::open()?;
+    if amend {
+        repo.amend_commit(&subject, body.as_deref())?;
+        println!("{}", style("Amended last commit").green());
+    } else {
+        repo.create_commit(&subject, body.as_deref())?;
+        println!("{}", style(format!("Created commit: {}", subject)).green());
+    }
+    Ok(())
+}
+
+// ========== DIFF ==========
+
+fn cmd_diff(what: String, path: Option<String>) -> Result<()> {
+    let repo = GitRepo::open()?;
+    let mode = match what.to_lowercase().as_str() {
+        "staged" | "cached" => crate::git::DiffMode::Staged,
+        "head" | "committed" => crate::git::DiffMode::Head,
+        _ => crate::git::DiffMode::Unstaged,
+    };
+    let diff = repo.diff(mode, path.as_deref())?;
+    if diff.trim().is_empty() {
+        println!("(no diff)");
+    } else {
+        print!("{}", diff);
+    }
+    Ok(())
+}
+
+// ========== BLAME ==========
+
+fn cmd_blame(path: String, commit: Option<String>) -> Result<()> {
+    let repo = GitRepo::open()?;
+    let blame = repo.blame_file(&path, commit.as_deref())?;
+    for b in blame {
+        println!(
+            "{:>6}  {:<18}  {:.8}  {}",
+            b.line, b.author, b.commit, b.summary
+        );
+    }
+    Ok(())
+}
+
+// ========== LOG ==========
+
+fn cmd_log(path: Option<String>, count: usize) -> Result<()> {
+    let repo = GitRepo::open()?;
+    match path {
+        Some(p) => {
+            for c in repo.file_history(&p)? {
+                println!("{}  {}  {}  {}", c.short_id, c.author, c.author_date, c.message);
+            }
+        }
+        None => {
+            for line in repo.list_recent_commits(count)? {
+                println!("{}", line);
+            }
+        }
+    }
+    Ok(())
+}
+
+// ========== GRAPH ==========
+
+fn cmd_graph(all: bool, limit: usize) -> Result<()> {
+    let repo = GitRepo::open()?;
+    let graph = repo.commit_graph(all, limit)?;
+    for n in &graph.nodes {
+        let refs: Vec<String> = n.refs.iter().map(|r| r.name.clone()).collect();
+        let refstr = if refs.is_empty() { String::new() } else { format!("  ({})", refs.join(", ")) };
+        println!("* {:.8} {} {}  {}{}", n.id, n.author, n.date, n.message, refstr);
+    }
+    for r in &graph.detached_refs {
+        println!("  ref {} ({:?})", r.name, r.kind);
+    }
+    Ok(())
+}
+
+// ========== REVERT ==========
+
+fn cmd_revert(commit: String) -> Result<()> {
+    let repo = GitRepo::open()?;
+    repo.revert_commit(&commit)?;
+    println!("{}", style(format!("Reverted {}", commit)).green());
+    Ok(())
+}
+
+// ========== RESET ==========
+
+fn cmd_reset(mode: String, target: String) -> Result<()> {
+    let repo = GitRepo::open()?;
+    let m = match mode.to_lowercase().as_str() {
+        "soft" => crate::git::ResetMode::Soft,
+        "hard" => crate::git::ResetMode::Hard,
+        _ => crate::git::ResetMode::Mixed,
+    };
+    repo.reset(m, &target)?;
+    println!("{}", style(format!("Reset ({}) to {}", mode, target)).green());
+    Ok(())
+}
+
+// ========== PICK (cherry-pick) ==========
+
+fn cmd_pick(commit: String) -> Result<()> {
+    let repo = GitRepo::open()?;
+    repo.cherry_pick_commit(&commit)?;
+    println!("{}", style(format!("Cherry-picked {}", commit)).green());
     Ok(())
 }

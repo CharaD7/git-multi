@@ -331,6 +331,9 @@ pub enum Commands {
         #[arg(value_name = "PATH")]
         path: String,
     },
+
+    /// Update git-multi to the latest GitHub Release (future implementation)
+    SelfUpdate,
 }
 
 #[derive(Debug, Subcommand)]

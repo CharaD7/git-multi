@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   uncommitted work.
 - TUI recovery keybinding `O` to merge the auto-saved state back into the working
   tree when available.
+- Future `git-multi self-update` CLI command (implementation pending) with platform-
+  aware GitHub Release asset download and portable/path-aware install refusal.
 - Full git coverage: granular stage/unstage/restore, amend, revert, reset
   (soft/mixed/hard), cherry-pick, unified diffs (staged/unstaged/HEAD).
 - GitLens features: per-line blame, file history, line history.

@@ -3,6 +3,7 @@ mod config;
 mod error;
 mod git;
 mod tui;
+mod update;
 
 use cli::*;
 use error::*;
@@ -94,6 +95,11 @@ fn run(cli: &Cli) -> Result<()> {
             Commands::Restore { path } => {
                 GitRepo::open()?.restore_file(&path)?;
                 println!("{}", style(format!("Restored: {}", path)).green());
+                Ok(())
+            }
+            Commands::SelfUpdate => {
+                update::self_update()
+                    .map_err(|e| crate::error::GitMultiError::SyncError(e.to_string()))?;
                 Ok(())
             }
         }

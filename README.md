@@ -280,6 +280,20 @@ This is intended as a last-resort safety net, not a replacement for real commits
 When you are happy with your work, commit it normally so it becomes part of your
 branch history.
 
+### Self-update (planned)
+
+A future `git-multi self-update` command will download the matching GitHub Release
+asset for your platform and replace the running binary in place, making it easier to
+stay current without using Cargo or a system package manager.
+
+In scope:
+- Linux (`AppImage` / `tar.xz`), Windows (`.zip` with `.exe`), macOS (`.pkg` / `tar.xz`).
+- Portable / manually-extracted installs: replaced in place.
+- Cargo installs (`.cargo/bin`) and package-managed installs (`.deb`, `.rpm`, `.pkg`, `.msi`): refused with a clear "use your installer instead" message.
+- Backup of the previous binary to `{binary}.previous.{pid}`.
+
+Not in scope for the initial implementation: delta updates, background TUI update checks, or automated rollback. If you need the feature sooner, upvote/star the repo or open an issue tagging `self-update`.
+
 ## Configuration
 
 `git-multi` stores its configuration in `.gitmulti/config.toml` within your repository. This file tracks default remotes, sync preferences, and metadata for each remote.

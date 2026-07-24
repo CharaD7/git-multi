@@ -1477,3 +1477,93 @@ impl std::fmt::Display for BranchInfo {
 }
 
 // Re-export git2 types for convenience
+
+// Auto-save ------------------------------------------------------------------
+
+const AUTOSAVE_REF: &str = "refs/gitmulti/autosave";
+
+impl GitRepo {
+    /// Ensure the autosave ref exists, pointing at HEAD if it does not yet exist.
+    pub fn ensure_autosave_ref(&self) -> Result<()> {
+        if self.repo.find_reference(AUTOSAVE_REF).is_err() {
+            let head = self.repo.head()?;
+            let oid = head.target().ok_or_else(|| {
+                GitMultiError::SyncError("HEAD has no target".to_string())
+            })?;
+            self.repo.reference(AUTOSAVE_REF, oid, true, "init autosave ref")?;
+        }
+        Ok(())
+    }
+
+    /// Returns true if the autosave ref exists in this repository.
+    pub fn autosave_ref_exists(&self) -> bool {
+        self.repo.find_reference(AUTOSAVE_REF).is_ok()
+    }
+
+    /// If the working tree is dirty, create a new unreferenced commit capturing the
+    /// current state and fast-forward `refs/gitmulti/autosave` to it. Returns
+    /// `Ok(true)` if a snapshot was written, `Ok(false)` if the repo was clean.
+    pub fn write_autosave_snapshot(&self) -> Result<bool> {
+        let statuses = self.repo.statuses(None)?;
+        let dirty = statuses.iter().any(|s| {
+            s.status()
+                .intersects(git2::Status::WT_NEW | git2::Status::WT_MODIFIED | git2::Status::WT_DELETED | git2::Status::WT_RENAMED | git2::Status::WT_TYPECHANGE)
+        });
+        if !dirty {
+            return Ok(false);
+        }
+
+        let workdir = self.workdir();
+        let stage_status = Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(workdir)
+            .status()
+            .map_err(GitMultiError::IoError)?;
+        if !stage_status.success() {
+            return Err(GitMultiError::SyncError("git add failed for auto-save".to_string()));
+        }
+
+        let mut index = self.repo.index()?;
+        let tree_oid = index.write_tree()?;
+        let tree = self.repo.find_tree(tree_oid)?;
+        let parent = self.head_commit()?;
+        let sig = self.repo.signature()?;
+        let parents = [&parent];
+        let commit_oid = self.repo.commit(
+            None,
+            &sig,
+            &sig,
+            "[auto-save] workspace snapshot",
+            &tree,
+            &parents,
+        )?;
+
+        let mut ref_obj = self.repo.find_reference(AUTOSAVE_REF)?;
+        ref_obj.set_target(commit_oid, "[auto-save] update snapshot")?;
+        Ok(true)
+    }
+
+    /// Merge the auto-saved state into the current working tree.
+    ///
+    /// This performs `git checkout refs/gitmulti/autosave -- .` so that files
+    /// from the hidden snapshot overwrite whatever is currently on disk.
+    pub fn restore_from_autosave(&self) -> Result<()> {
+        if !self.autosave_ref_exists() {
+            return Err(GitMultiError::SyncError(
+                "No auto-save snapshot found. Use the TUI (O) after an idle autosave has occurred.".to_string(),
+            ));
+        }
+        let workdir = self.workdir();
+        let status = Command::new("git")
+            .args(["checkout", AUTOSAVE_REF, "--", "."])
+            .current_dir(workdir)
+            .status()
+            .map_err(GitMultiError::IoError)?;
+        if !status.success() {
+            return Err(GitMultiError::SyncError(
+                "git checkout refs/gitmulti/autosave failed".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}

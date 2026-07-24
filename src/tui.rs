@@ -7,7 +7,7 @@ use ratatui::{
 };
 use std::collections::HashMap;
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::git::{BlameLine, CommitGraph, DiffMode, FileStatus, ResetMode};
 
@@ -107,11 +107,14 @@ struct AppState {
     graph: Option<CommitGraph>,
     graph_all: bool,
     graph_state: ListState,
+    last_activity: Instant,
+    autosave_ref_exists: bool,
 }
 
 impl AppState {
     fn new() -> io::Result<Self> {
         let repo = crate::git::GitRepo::open().map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        let autosave_ref_exists = repo.autosave_ref_exists() || repo.ensure_autosave_ref().is_ok();
         let mut state = Self {
             repo,
             remotes: Vec::new(),
@@ -130,6 +133,8 @@ impl AppState {
             graph: None,
             graph_all: false,
             graph_state: ListState::default(),
+            last_activity: Instant::now(),
+            autosave_ref_exists,
         };
         state.refresh();
         state.remote_state.select(Some(0));
@@ -423,6 +428,20 @@ pub fn run_tui() -> io::Result<()> {
         if handle_events(&mut state)? {
             break;
         }
+        if state.autosave_ref_exists
+            && state.last_activity.elapsed() >= Duration::from_secs(30)
+        {
+            match state.repo.write_autosave_snapshot() {
+                Ok(true) => {
+                    state.last_activity = Instant::now();
+                    state.log("[auto-save] snapshot captured".to_string());
+                }
+                Ok(false) => {
+                    state.last_activity = Instant::now();
+                }
+                Err(_) => {}
+            }
+        }
     }
 
     ratatui::restore();
@@ -450,10 +469,16 @@ fn ui(f: &mut Frame, state: &mut AppState) {
     render_files(f, state, inner[2]);
     render_detail(f, state, inner[3]);
 
-    let help = "[Tab] Focus  [↑/↓] Move  [Space] Toggle  [f] Fetch [p] Push [l] Pull  [M] Merge \
-[C] Commit  [a] Add remote  [c] Branch  [m] Rename  [x] Delete  [D] Default\n\
-[g] Git Graph  [b] Blame file  [d] Diff  [F] Files  [s] Status  [S] Stage/Unstage file  \
-[A] Amend  [R] Revert  [Z] Reset  [P] Cherry-pick  [v] Commits  [r] Refresh  [q] Quit";
+    let base = "[Tab] Focus  [↑/↓] Move  [Space] Toggle  [f] Fetch [p] Push [l] Pull  [M] Merge \
+ [C] Commit  [a] Add remote  [c] Branch  [m] Rename  [x] Delete  [D] Default\n\
+ [g] Git Graph  [b] Blame file  [d] Diff  [F] Files  [s] Status  [S] Stage/Unstage file  \
+ [A] Amend  [R] Revert  [Z] Reset  [P] Cherry-pick  [v] Commits  ";
+    let suffix = if state.autosave_ref_exists {
+        "[O] Restore auto-save  "
+    } else {
+        ""
+    };
+    let help = format!("{}{}[r] Refresh  [q] Quit", base, suffix);
     let footer = Paragraph::new(help)
         .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(CYAN)))
         .style(Style::default().fg(CREAM).bg(Color::Rgb(50, 50, 50)));
@@ -795,6 +820,7 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
     if event::poll(Duration::from_millis(100))? {
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Press {
+                state.last_activity = Instant::now();
                 if handle_overlay(state, key) {
                     return Ok(false);
                 }
@@ -806,6 +832,20 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                 }
                 if (key.modifiers.contains(KeyModifiers::SHIFT) && key.code == KeyCode::Char('c')) || key.code == KeyCode::Char('C') {
                     state.overlay = Overlay::CommitType { value: String::new() };
+                    return Ok(false);
+                }
+                if key.code == KeyCode::Char('O') {
+                    if state.autosave_ref_exists {
+                        match state.repo.restore_from_autosave() {
+                            Ok(()) => {
+                                state.refresh();
+                                state.log("Restored from auto-save snapshot".to_string());
+                            }
+                            Err(e) => state.log(format!("Auto-save restore failed: {}", e)),
+                        }
+                    } else {
+                        state.log("No auto-save snapshot available yet".to_string());
+                    }
                     return Ok(false);
                 }
 

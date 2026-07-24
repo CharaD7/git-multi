@@ -18,6 +18,9 @@ A CLI tool for managing multiple Git remotes and syncing content between them. `
   from HEAD or all refs, with one-key cherry-pick of any commit.
 - **Diffs everywhere:** unified diffs of staged / unstaged / HEAD changes, for the whole tree or a
   single file, in both CLI and GUI.
+- **Auto-save safety net in the GUI:** when you are idle for ~30s, the current dirty state is
+  captured into `refs/gitmulti/autosave` (not a normal branch). If something like an AI-driven
+  `git reset --hard` happens, press `O` to restore from that snapshot without losing work.
 
 ## Installation
 
@@ -59,6 +62,7 @@ Navigation & global keys:
 - `b` — Blame the selected file (GitLens: author, commit, date per line)
 - `d` — Diff (unstaged), `F` — Files panel, `s` — Status view, `v` — Commits view
 - `S` — on a file: stage if unstaged, unstage if staged
+- `O` — restore from auto-save (merge the hidden safety snapshot back into the working tree)
 - `r` — force refresh, `q` — quit
 
 Remote actions (when the **Remotes** panel is focused):
@@ -255,6 +259,26 @@ git-multi graph --all --limit 200
 
 All of the above (plus granular stage/unstage, amend, revert, reset, and cherry-pick) are
 also available directly inside the GUI — see [GUI Mode](#gui-mode).
+
+### Auto-save safety net
+
+When you are working in the TUI and stop typing for about **30 seconds**, `git-multi`
+automatically takes a snapshot of your dirty working tree and stores it in a hidden
+git ref: `refs/gitmulti/autosave`.
+
+Key points:
+- The auto-saved state is **not** a normal branch and does **not** appear in
+  `git log main`. It only lives in the `refs/gitmulti/` namespace.
+- The snapshot is only created if the repo actually has uncommitted changes.
+- If an AI-assisted command or any other operation destroys your working tree
+  (for example, `git reset --hard`), you can recover by pressing **`O`** in the
+  TUI. That merges the auto-saved files back into the current working tree.
+- Auto-save is **opt-out**. To disable it, set `auto_save = false` under
+  `[gitmulti]` in `.gitmulti/config.toml`.
+
+This is intended as a last-resort safety net, not a replacement for real commits.
+When you are happy with your work, commit it normally so it becomes part of your
+branch history.
 
 ## Configuration
 

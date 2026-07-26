@@ -685,7 +685,11 @@ fn modal(f: &mut Frame, percent_x: u16, height: u16, title: &str, text: &str, co
 }
 
 fn border_style(focused: bool) -> Style {
-    if focused { Style::default().fg(CYAN) } else { Style::default().fg(GRAY) }
+    if focused {
+        Style::default().fg(CYAN).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(GRAY)
+    }
 }
 
 fn build_detail(state: &AppState) -> String {
@@ -866,7 +870,9 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
 
                 match key.code {
                     KeyCode::Char('q') => return Ok(true),
-                    KeyCode::Tab | KeyCode::Right | KeyCode::Left => cycle_focus(state),
+                    KeyCode::Tab => cycle_focus(state),
+                    KeyCode::Right => cycle_focus(state),
+                    KeyCode::Left => cycle_focus_back(state),
                     KeyCode::Down => move_down(state),
                     KeyCode::Up => move_up(state),
                     KeyCode::Char(' ') => {
@@ -1387,6 +1393,17 @@ fn cycle_focus(state: &mut AppState) {
         Focus::Files => Focus::Detail,
         Focus::Detail => Focus::Graph,
         Focus::Graph => Focus::Remotes,
+    };
+    state.refresh();
+}
+
+fn cycle_focus_back(state: &mut AppState) {
+    state.focus = match state.focus {
+        Focus::Remotes => Focus::Graph,
+        Focus::Graph => Focus::Detail,
+        Focus::Detail => Focus::Files,
+        Focus::Files => Focus::Branches,
+        Focus::Branches => Focus::Remotes,
     };
     state.refresh();
 }

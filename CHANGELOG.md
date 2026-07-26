@@ -14,8 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   uncommitted work.
 - TUI recovery keybinding `O` to merge the auto-saved state back into the working
   tree when available.
-- Future `git-multi self-update` CLI command (implementation pending) with platform-
-  aware GitHub Release asset download and portable/path-aware install refusal.
+- Cherry-pick overlay expanded to 85% width, 5 rows with context display
+  (commit author/message in Graph view, file dirty status in Files view).
+- Press `d` in the cherry-pick overlay to preview the commit diff in the
+  detail panel before executing the cherry-pick.
+- Focus-specific `P` key: pre-fills commit SHA in Graph view, pre-fills
+  dirty file path in Files view.
 - Full git coverage: granular stage/unstage/restore, amend, revert, reset
   (soft/mixed/hard), cherry-pick, unified diffs (staged/unstaged/HEAD).
 - GitLens features: per-line blame, file history, line history.

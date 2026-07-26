@@ -15,9 +15,10 @@ A CLI tool for managing multiple Git remotes and syncing content between them. `
 - **GitLens in the GUI:** per-line blame with author/commit/date, plus file history, so you can
   see who changed what and when without leaving the terminal.
 - **Git Graph in the GUI:** an interactive commit DAG with branch/tag/remote ref labels, reachable
-  from HEAD or all refs, with one-key cherry-pick of any commit.
+  from HEAD or all refs, with one-key cherry-pick of any node. Press `d` in the cherry-pick
+  overlay to preview the commit diff before applying.
 - **Diffs everywhere:** unified diffs of staged / unstaged / HEAD changes, for the whole tree or a
-  single file, in both CLI and GUI.
+  single file, in both CLI and GUI. Diff preview is also available during cherry-pick (`d` key).
 - **Auto-save safety net in the GUI:** when you are idle for ~30s, the current dirty state is
   captured into `refs/gitmulti/autosave` (not a normal branch). If something like an AI-driven
   `git reset --hard` happens, press `O` to restore from that snapshot without losing work.
@@ -57,7 +58,7 @@ Navigation & global keys:
 - `A` — amend the last commit (enter a new message)
 - `R` — revert a commit (enter a sha/ref)
 - `Z` — reset current branch (soft/mixed/hard, then a target)
-- `P` — cherry-pick a single commit onto HEAD
+- `P` — cherry-pick a single commit onto HEAD (press `d` in the overlay to preview the diff)
 - `g` — Git Graph (commit DAG with branch/tag/remote labels; `a` toggles all-refs; `Enter` cherry-picks the selected commit)
 - `b` — Blame the selected file (GitLens: author, commit, date per line)
 - `d` — Diff (unstaged), `F` — Files panel, `s` — Status view, `v` — Commits view

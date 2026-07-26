@@ -901,6 +901,23 @@ impl GitRepo {
         Ok(parse_diff_lines(&text))
     }
 
+    /// Show the full diff of a commit (equivalent to `git show COMMIT`).
+    pub fn commit_diff(&self, commit_spec: &str) -> Result<String> {
+        let workdir = self.workdir();
+        let oid = self.resolve_commit_spec(commit_spec)?;
+        let out = Command::new("git")
+            .args(["show", &oid.to_string()])
+            .current_dir(workdir)
+            .output()
+            .map_err(GitMultiError::IoError)?;
+        if !out.status.success() {
+            return Err(GitMultiError::SyncError(
+                String::from_utf8_lossy(&out.stderr).to_string(),
+            ));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    }
+
     // ========================================================================
     // Amend / revert / reset
     // ========================================================================

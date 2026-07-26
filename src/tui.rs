@@ -42,7 +42,7 @@ enum Overlay {
     RevertCommit { value: String },
     ResetCommit { value: String, mode: ResetMode },
     DiffPath { value: String, mode: DiffMode },
-    CherryPick { value: String },
+    CherryPick { value: String, context: String },
     Message { text: String, is_error: bool },
 }
 
@@ -57,6 +57,7 @@ enum DetailMode {
     Blame,
     Graph,
     Commit,
+    CommitDiff,
 }
 
 impl DetailMode {
@@ -70,6 +71,7 @@ impl DetailMode {
             DetailMode::Blame => " Blame (GitLens) ",
             DetailMode::Graph => " Git Graph ",
             DetailMode::Commit => " Commit ",
+            DetailMode::CommitDiff => " Commit Diff ",
         }
     }
 }
@@ -101,6 +103,7 @@ struct AppState {
     log: Vec<String>,
     detail_mode: DetailMode,
     commit_msg: String,
+    commit_diff_spec: Option<String>,
     // Cached heavier views (refreshed on demand)
     blame: Vec<BlameLine>,
     blame_path: String,
@@ -128,6 +131,7 @@ impl AppState {
             log: Vec::new(),
             detail_mode: DetailMode::Detail,
             commit_msg: String::new(),
+            commit_diff_spec: None,
             blame: Vec::new(),
             blame_path: String::new(),
             graph: None,
@@ -579,6 +583,10 @@ fn render_detail(f: &mut Frame, state: &mut AppState, area: Rect) {
         DetailMode::Blame => build_blame(state),
         DetailMode::Graph => build_graph(state),
         DetailMode::Commit => build_commit(state),
+        DetailMode::CommitDiff => state
+            .repo
+            .commit_diff(state.commit_diff_spec.as_deref().unwrap_or(""))
+            .unwrap_or_else(|e| format!("Error: {}", e)),
     };
     let p = Paragraph::new(text)
         .block(block)
@@ -651,8 +659,15 @@ fn render_overlay(f: &mut Frame, state: &AppState) {
             &format!("Reset ({:?}) to (sha/ref):\n> {}\u{2588}", mode, value), YELLOW),
         Overlay::DiffPath { value, mode } => modal(f, 70, 3, " Diff file ",
             &format!("Diff ({:?}) for path:\n> {}\u{2588}", mode, value), CYAN),
-        Overlay::CherryPick { value } => modal(f, 70, 3, " Cherry-pick commit ",
-            &format!("Commit to cherry-pick (sha/ref):\n> {}\u{2588}", value), VIBRANT_PINK),
+        Overlay::CherryPick { value, context } => {
+            let ctx_line = if context.is_empty() {
+                String::new()
+            } else {
+                format!("\n{}", context)
+            };
+            modal(f, 85, 5, " Cherry-pick commit ",
+                &format!("Commit to cherry-pick (sha/ref):\n> {}\u{2588}{}\n\n[d] preview diff  [Enter] cherry-pick  [Esc] cancel", value, ctx_line), VIBRANT_PINK)
+        }
         Overlay::Message { text, is_error } => {
             let color = if *is_error { RED } else { GREEN };
             modal(f, 70, 4, " Message ", &format!("{}\n\n[Enter/Esc to dismiss]", text), color)
@@ -877,7 +892,6 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                     KeyCode::Char('A') => { state.overlay = Overlay::AmendMsg { value: String::new() }; return Ok(false); }
                     KeyCode::Char('R') => { state.overlay = Overlay::RevertCommit { value: String::new() }; return Ok(false); }
                     KeyCode::Char('Z') => { state.overlay = Overlay::ResetCommit { value: String::new(), mode: ResetMode::Mixed }; return Ok(false); }
-                    KeyCode::Char('P') => { state.overlay = Overlay::CherryPick { value: String::new() }; return Ok(false); }
                     KeyCode::Char('S') => {
                         if let Some(p) = state.selected_file_path() {
                             let f = state.files.iter().find(|f| f.path == p);
@@ -897,7 +911,8 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                                 if let Some(graph) = &state.graph {
                                     if let Some(idx) = state.graph_state.selected() {
                                         if let Some(n) = graph.nodes.get(idx) {
-                                            state.overlay = Overlay::CherryPick { value: n.short_id.clone() };
+                                            let ctx = format!("Commit: {} by {} - {}", n.short_id, n.author, n.message.lines().next().unwrap_or(""));
+                                            state.overlay = Overlay::CherryPick { value: n.short_id.clone(), context: ctx };
                                         }
                                     }
                                 }
@@ -948,6 +963,17 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                         KeyCode::Char('f') => state.action_fetch(),
                         KeyCode::Char('p') => state.action_push(),
                         KeyCode::Char('l') => state.action_pull(),
+                        KeyCode::Char('P') => {
+                            if let Some(p) = state.selected_file_path() {
+                                let is_dirty = state.files.iter().any(|f| f.path == p && (f.staged != ' ' || f.unstaged != ' '));
+                                if is_dirty {
+                                    state.overlay = Overlay::CherryPick { value: p.clone(), context: format!("File: {} (dirty)", p) };
+                                } else {
+                                    state.overlay = Overlay::CherryPick { value: String::new(), context: String::new() };
+                                }
+                            }
+                            return Ok(false);
+                        }
                         _ => {}
                     },
                     Focus::Detail => match key.code {
@@ -958,6 +984,17 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                     },
                     Focus::Graph => match key.code {
                         KeyCode::Char('a') => { state.graph_all = !state.graph_all; state.load_graph(); }
+                        KeyCode::Char('P') => {
+                            if let Some(graph) = &state.graph {
+                                if let Some(idx) = state.graph_state.selected() {
+                                    if let Some(n) = graph.nodes.get(idx) {
+                                        let ctx = format!("Commit: {} by {} - {}", n.short_id, n.author, n.message.lines().next().unwrap_or(""));
+                                        state.overlay = Overlay::CherryPick { value: n.short_id.clone(), context: ctx };
+                                    }
+                                }
+                            }
+                            return Ok(false);
+                        }
                         _ => {}
                     },
                 }
@@ -1308,7 +1345,7 @@ fn handle_overlay(state: &mut AppState, key: crossterm::event::KeyEvent) -> bool
                 _ => {}
             }
         }
-        Overlay::CherryPick { value } => {
+        Overlay::CherryPick { value, context: _ } => {
             match code {
                 KeyCode::Enter => {
                     let spec = value.trim().to_string();
@@ -1317,9 +1354,22 @@ fn handle_overlay(state: &mut AppState, key: crossterm::event::KeyEvent) -> bool
                         state.overlay = Overlay::Message { text: "Cherry-picked (see log)".to_string(), is_error: false };
                     }
                 }
+                KeyCode::Char('d') => {
+                    let spec = value.trim().to_string();
+                    if !spec.is_empty() {
+                        state.commit_diff_spec = Some(spec.clone());
+                        state.detail_mode = DetailMode::CommitDiff;
+                        state.overlay = Overlay::Message { text: format!("Diff for {} shown in detail panel", spec), is_error: false };
+                    } else {
+                        state.overlay = Overlay::Message { text: "Enter a commit SHA/ref first".to_string(), is_error: true };
+                    }
+                }
                 KeyCode::Char(c) => { value.push(c); }
                 KeyCode::Backspace => { value.pop(); }
-                KeyCode::Esc => state.overlay = Overlay::None,
+                KeyCode::Esc => {
+                    state.overlay = Overlay::None;
+                    state.commit_diff_spec = None;
+                }
                 _ => {}
             }
         }

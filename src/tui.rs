@@ -522,6 +522,7 @@ fn render_branches(f: &mut Frame, state: &AppState, area: Rect) {
     let sel_count = state.selected_branches().len();
     let block = Block::default()
         .title(format!("{} [{} selected]", title, sel_count))
+        .title_bottom(" [c] Create  [m] Rename  [x] Delete  [Space] Toggle ")
         .borders(Borders::ALL)
         .border_style(border_style(state.focus == Focus::Branches));
     let branch_list = List::new(branch_items)

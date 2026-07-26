@@ -617,11 +617,11 @@ fn render_detail(f: &mut Frame, state: &mut AppState, area: Rect) {
 
 fn render_overlay(f: &mut Frame, state: &AppState) {
     match &state.overlay {
-        Overlay::AddName { value } => modal(f, 60, 3, " Add Remote ",
+        Overlay::AddName { value } => modal(f, 60, 4, " Add Remote ",
             &format!("Remote name:\n> {}\u{2588}", value), RED),
-        Overlay::AddUrl { name, value } => modal(f, 70, 3, " Add Remote ",
+        Overlay::AddUrl { name, value } => modal(f, 70, 4, " Add Remote ",
             &format!("URL for '{}':\n> {}\u{2588}", name, value), RED),
-        Overlay::RenameRemote { old, value } => modal(f, 60, 3, " Rename Remote ",
+        Overlay::RenameRemote { old, value } => modal(f, 60, 4, " Rename Remote ",
             &format!("Rename '{}' to:\n> {}\u{2588}", old, value), RED),
         Overlay::RemoveRemote { name } => modal(f, 60, 4, " Remove Remote ",
             &format!("Remove remote '{}'?\n\n[y] Yes  [n/Esc] Cancel", name), RED),
@@ -631,11 +631,11 @@ fn render_overlay(f: &mut Frame, state: &AppState) {
                 1 => format!("Base (commit/branch):\n> {}\u{2588}", base),
                 _ => format!("Push to remote (empty = local only):\n> {}\u{2588}", remote),
             };
-            modal(f, 65, 3, " Create Branch ", &prompt, RED)
+            modal(f, 65, 4, " Create Branch ", &prompt, RED)
         }
         Overlay::DeleteBranch { name } => modal(f, 60, 4, " Delete Branch ",
             &format!("Delete local branch '{}'?\n\n[y] Yes  [n/Esc] Cancel", name), RED),
-        Overlay::RenameBranch { old, value } => modal(f, 60, 3, " Rename Branch ",
+        Overlay::RenameBranch { old, value } => modal(f, 60, 4, " Rename Branch ",
             &format!("Rename '{}' to:\n> {}\u{2588}", old, value), RED),
         Overlay::Merge { step, src_remote, src_branch, dest_remote, dest_branch } => {
             let prompt = match step {
@@ -644,21 +644,21 @@ fn render_overlay(f: &mut Frame, state: &AppState) {
                 2 => format!("Destination remote:\n> {}\u{2588}", dest_remote),
                 _ => format!("Destination branch:\n> {}\u{2588}", dest_branch),
             };
-            modal(f, 65, 3, " Merge ", &prompt, VIBRANT_PINK)
+            modal(f, 65, 4, " Merge ", &prompt, VIBRANT_PINK)
         }
-        Overlay::CommitType { value } => modal(f, 60, 5, " Commit Type ",
+        Overlay::CommitType { value } => modal(f, 60, 7, " Commit Type ",
             &format!("Select commit type:\n\n[f] feat  [x] fix  [d] docs  [s] style  [r] refactor\n[T] test  [c] chore  [b] build  [p] perf\n\nOr type to filter:\n> {}\u{2588}", value), GREEN),
-        Overlay::CommitMsg { value } => modal(f, 70, 3, " Commit Message ",
+        Overlay::CommitMsg { value } => modal(f, 70, 4, " Commit Message ",
             &format!("Commit subject:\n> {}\u{2588}", value), GREEN),
-        Overlay::CommitBody { value } => modal(f, 70, 5, " Commit Body ",
+        Overlay::CommitBody { value } => modal(f, 70, 6, " Commit Body ",
             &format!("Commit body (optional, Enter to skip):\n> {}\u{2588}", value), GREEN),
-        Overlay::AmendMsg { value } => modal(f, 70, 3, " Amend last commit ",
+        Overlay::AmendMsg { value } => modal(f, 70, 4, " Amend last commit ",
             &format!("New message:\n> {}\u{2588}", value), YELLOW),
-        Overlay::RevertCommit { value } => modal(f, 60, 3, " Revert commit ",
+        Overlay::RevertCommit { value } => modal(f, 60, 4, " Revert commit ",
             &format!("Commit to revert (sha/ref):\n> {}\u{2588}", value), YELLOW),
-        Overlay::ResetCommit { value, mode } => modal(f, 65, 3, " Reset ",
+        Overlay::ResetCommit { value, mode } => modal(f, 65, 4, " Reset ",
             &format!("Reset ({:?}) to (sha/ref):\n> {}\u{2588}", mode, value), YELLOW),
-        Overlay::DiffPath { value, mode } => modal(f, 70, 3, " Diff file ",
+        Overlay::DiffPath { value, mode } => modal(f, 70, 4, " Diff file ",
             &format!("Diff ({:?}) for path:\n> {}\u{2588}", mode, value), CYAN),
         Overlay::CherryPick { value, context } => {
             let ctx_line = if context.is_empty() {
@@ -666,7 +666,7 @@ fn render_overlay(f: &mut Frame, state: &AppState) {
             } else {
                 format!("\n{}", context)
             };
-            modal(f, 85, 5, " Cherry-pick commit ",
+            modal(f, 85, 6, " Cherry-pick commit ",
                 &format!("Commit to cherry-pick (sha/ref):\n> {}\u{2588}{}\n\n[d] preview diff  [Enter] cherry-pick  [Esc] cancel", value, ctx_line), VIBRANT_PINK)
         }
         Overlay::Message { text, is_error } => {
@@ -680,7 +680,8 @@ fn render_overlay(f: &mut Frame, state: &AppState) {
 fn modal(f: &mut Frame, percent_x: u16, height: u16, title: &str, text: &str, color: Color) {
     let area = centered_rect(percent_x, height, f.area());
     let m = Paragraph::new(text)
-        .block(Block::default().title(title).borders(Borders::ALL).border_style(Style::default().fg(color)));
+        .block(Block::default().title(title).borders(Borders::ALL).border_style(Style::default().fg(color)))
+        .style(Style::default().fg(Color::White));
     f.render_widget(ratatui::widgets::Clear, area);
     f.render_widget(m, area);
 }

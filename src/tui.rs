@@ -1375,7 +1375,7 @@ fn handle_overlay(state: &mut AppState, key: crossterm::event::KeyEvent) -> bool
                 KeyCode::Char('p') => { *value = "perf:".to_string(); }
                 KeyCode::Enter => {
                     let msg = value.trim();
-                    if !msg.is_empty() && !msg.ends_with(':') {
+                    if !msg.is_empty() {
                         state.overlay = Overlay::CommitMsg { value: msg.to_string() };
                     }
                 }

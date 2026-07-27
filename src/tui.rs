@@ -2,6 +2,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
@@ -593,28 +594,38 @@ fn render_detail(f: &mut Frame, state: &mut AppState, area: Rect) {
     }
     
     let text = match state.detail_mode {
-        DetailMode::Detail => build_detail(state),
-        DetailMode::Status => state
+        DetailMode::Detail => string_to_lines(&build_detail(state)),
+        DetailMode::Status => string_to_lines(&state
             .repo
             .status_text()
-            .unwrap_or_else(|e| format!("Error: {}", e)),
-        DetailMode::Files => build_files(state),
-        DetailMode::DiffStaged => state
-            .repo
-            .diff(DiffMode::Staged, None)
-            .unwrap_or_else(|e| format!("Error: {}", e)),
-        DetailMode::DiffUnstaged => state
-            .repo
-            .diff(DiffMode::Unstaged, None)
-            .unwrap_or_else(|e| format!("Error: {}", e)),
-        DetailMode::Blame => build_blame(state),
-        DetailMode::Graph => build_graph(state),
-        DetailMode::CommitDiff => state
-            .repo
-            .commit_diff(state.commit_diff_spec.as_deref().unwrap_or(""))
-            .unwrap_or_else(|e| format!("Error: {}", e)),
-        _ => String::new(),
+            .unwrap_or_else(|e| format!("Error: {}", e))),
+        DetailMode::Files => string_to_lines(&build_files(state)),
+        DetailMode::DiffStaged => {
+            let diff = state.repo.diff(DiffMode::Staged, None).unwrap_or_else(|e| format!("Error: {}", e));
+            diff_to_lines(diff)
+        }
+        DetailMode::DiffUnstaged => {
+            let diff = state.repo.diff(DiffMode::Unstaged, None).unwrap_or_else(|e| format!("Error: {}", e));
+            diff_to_lines(diff)
+        }
+        DetailMode::Blame => string_to_lines(&build_blame(state)),
+        DetailMode::Graph => string_to_lines(&build_graph(state)),
+        DetailMode::CommitDiff => {
+            let diff = state.repo.commit_diff(state.commit_diff_spec.as_deref().unwrap_or("")).unwrap_or_else(|e| format!("Error: {}", e));
+            diff_to_lines(diff)
+        }
+        _ => vec![Line::from(Span::styled(String::new(), Style::default().fg(CREAM)))],
     };
+    if state.detail_mode == DetailMode::Commit {
+        let items = build_commit_details(state);
+        let p = Paragraph::new(items)
+            .block(block)
+            .style(Style::default().fg(CREAM))
+            .wrap(Wrap { trim: false })
+            .scroll((0, 0));
+        f.render_widget(p, area);
+        return;
+    }
     let p = Paragraph::new(text)
         .block(block)
         .style(Style::default().fg(CREAM))
@@ -837,8 +848,36 @@ fn build_graph(state: &AppState) -> String {
         .join("\n")
 }
 
-fn build_commit_details(state: &AppState) -> String {
-    let mut out = String::new();
+fn string_to_lines(s: &str) -> Vec<Line<'static>> {
+    s.lines()
+        .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(CREAM))))
+        .collect()
+}
+
+fn diff_to_lines(diff: String) -> Vec<Line<'static>> {
+    diff.lines()
+        .map(|line| {
+            let content = line.to_string();
+            let styled = if line.starts_with('+') {
+                Line::from(Span::styled(content, Style::default().fg(GREEN)))
+            } else if line.starts_with('-') {
+                Line::from(Span::styled(content, Style::default().fg(RED)))
+            } else if line.starts_with("@@") {
+                Line::from(Span::styled(content, Style::default().fg(YELLOW).add_modifier(Modifier::BOLD)))
+            } else if line.starts_with("diff --git") || line.starts_with("index ") || line.starts_with("---") || line.starts_with("+++") {
+                Line::from(Span::styled(content, Style::default().fg(CYAN)))
+            } else if line.starts_with('\\') {
+                Line::from(Span::styled(content, Style::default().fg(GRAY)))
+            } else {
+                Line::from(Span::styled(content, Style::default().fg(CREAM)))
+            };
+            styled
+        })
+        .collect()
+}
+
+fn build_commit_details(state: &AppState) -> Vec<Line<'static>> {
+    let mut out: Vec<Line> = Vec::new();
 
     let sha = state.file_state.selected()
         .and_then(|i| state.commit_items.get(i))
@@ -846,46 +885,34 @@ fn build_commit_details(state: &AppState) -> String {
         .unwrap_or("");
 
     if sha.is_empty() {
-        out.push_str("No commit selected. Use [v] in Files panel to view commits.\n");
+        out.push(Line::from(Span::styled("No commit selected. Use [v] in Files panel to view commits.", Style::default().fg(CREAM))));
         return out;
     }
 
     match state.repo.commit_detail(sha) {
         Ok(detail) => {
-            out.push_str(&format!("Commit: {}\n", detail.short_id));
-            out.push_str(&format!("SHA:    {}\n", detail.id));
-            out.push_str(&format!("Author: {} <{}>\n", detail.author, detail.author_email));
-            out.push_str(&format!("Date:   {}\n", detail.author_date));
-            out.push_str(&format!("Committer: {} <{}>\n", detail.committer, detail.committer_date));
-            out.push_str(&format!("Message:\n  {}\n", detail.message.lines().next().unwrap_or("")));
+            out.push(Line::from(Span::styled(format!("Commit: {}", detail.short_id), Style::default().fg(CYAN))));
+            out.push(Line::from(Span::styled(format!("SHA:    {}", detail.id), Style::default().fg(GRAY))));
+            out.push(Line::from(Span::styled(format!("Author: {} <{}>", detail.author, detail.author_email), Style::default().fg(CREAM))));
+            out.push(Line::from(Span::styled(format!("Date:   {}", detail.author_date), Style::default().fg(GRAY))));
+            out.push(Line::from(Span::styled(format!("Committer: {} <{}>", detail.committer, detail.committer_date), Style::default().fg(CREAM))));
+            out.push(Line::from(Span::styled(format!("Message:\n  {}", detail.message.lines().next().unwrap_or("")), Style::default().fg(CREAM))));
             if !detail.parents.is_empty() {
-                out.push_str(&format!("Parents: {}\n", detail.parents.join(", ")));
+                out.push(Line::from(Span::styled(format!("Parents: {}", detail.parents.join(", ")), Style::default().fg(GRAY))));
             }
         }
         Err(e) => {
-            out.push_str(&format!("Error loading commit detail: {}\n", e));
+            out.push(Line::from(Span::styled(format!("Error loading commit detail: {}", e), Style::default().fg(RED))));
         }
     }
 
-    out.push_str("\n── Diff ──\n");
+    out.push(Line::from(Span::styled("\n── Diff ──", Style::default().fg(YELLOW))));
     match state.repo.commit_diff(sha) {
         Ok(diff) => {
-            let lines: Vec<&str> = diff.lines().collect();
-            if lines.len() > 80 {
-                for line in &lines[..80] {
-                    out.push_str(line);
-                    out.push('\n');
-                }
-                out.push_str(&format!("... ({} more lines)\n", lines.len() - 80));
-            } else {
-                for line in &lines {
-                    out.push_str(line);
-                    out.push('\n');
-                }
-            }
+            out.extend(diff_to_lines(diff));
         }
         Err(e) => {
-            out.push_str(&format!("Error loading diff: {}\n", e));
+            out.push(Line::from(Span::styled(format!("Error loading diff: {}", e), Style::default().fg(RED))));
         }
     }
 

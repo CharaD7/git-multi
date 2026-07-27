@@ -690,7 +690,7 @@ fn render_overlay(f: &mut Frame, state: &AppState) {
             };
             modal(f, 65, 4, " Merge ", &prompt, VIBRANT_PINK)
         }
-        Overlay::CommitType { value } => modal(f, 60, 8, " Commit Type ",
+        Overlay::CommitType { value } => modal(f, 60, 7, " Commit Type ",
             &format!("Select commit type:\n\n[f] feat  [x] fix  [d] docs  [s] style  [r] refactor\n[T] test  [c] chore  [b] build  [p] perf\n\nOr type to filter:\n> {}\u{2588}", value), GREEN),
         Overlay::CommitMsg { value } => modal(f, 70, 4, " Commit Message ",
             &format!("Commit subject:\n> {}\u{2588}", value), GREEN),
@@ -725,8 +725,7 @@ fn modal(f: &mut Frame, percent_x: u16, height: u16, title: &str, text: &str, co
     let area = centered_rect(percent_x, height, f.area());
     let m = Paragraph::new(text)
         .block(Block::default().title(title).borders(Borders::ALL).border_style(Style::default().fg(color)))
-        .style(Style::default().fg(Color::White))
-        .wrap(Wrap { trim: false });
+        .style(Style::default().fg(Color::White));
     f.render_widget(ratatui::widgets::Clear, area);
     f.render_widget(m, area);
 }

@@ -49,6 +49,7 @@ enum Overlay {
 
 /// Which detail panel mode is active.
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum DetailMode {
     Detail,
     Status,
@@ -631,7 +632,6 @@ fn render_detail(f: &mut Frame, state: &mut AppState, area: Rect) {
             f.render_widget(p, area);
             return;
         }
-        _ => vec![Line::from(Span::styled(String::new(), Style::default().fg(CREAM)))],
     };
     let p = Paragraph::new(text)
         .block(block)

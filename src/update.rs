@@ -1,4 +1,3 @@
-use std::io::Write;
 use std::process::Command;
 use std::{env, fs, io, path::PathBuf, process};
 
@@ -116,7 +115,7 @@ pub fn self_update() -> Result<(), UpdateError> {
 
     match fs::rename(&tmp_bin, &current_exe) {
         Ok(_) => {}
-        Err(e) => {
+        Err(_e) => {
             let _ = fs::remove_file(&tmp_bin);
             return Err(UpdateError::Network(format!(
                 "Failed to replace binary (on Windows the running .exe may be locked). \

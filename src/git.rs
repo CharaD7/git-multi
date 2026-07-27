@@ -1387,6 +1387,7 @@ pub enum ResetMode {
 
 /// A changed file in the working tree.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FileStatus {
     pub path: String,
     pub staged: char,
@@ -1397,6 +1398,7 @@ pub struct FileStatus {
 
 /// A line of blame output.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct BlameLine {
     pub line: usize,
     pub commit: String,
@@ -1408,6 +1410,7 @@ pub struct BlameLine {
 
 /// A line in a unified diff.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct DiffLineEntry {
     pub old_line: i64,
     pub new_line: i64,
@@ -1417,6 +1420,7 @@ pub struct DiffLineEntry {
 
 /// Summary metadata for a commit.
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct CommitSummary {
     pub id: String,
     pub short_id: String,
@@ -1431,6 +1435,7 @@ pub struct CommitSummary {
 
 /// A node in the commit DAG.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct CommitNode {
     pub id: String,
     pub short_id: String,

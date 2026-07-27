@@ -584,17 +584,6 @@ fn render_detail(f: &mut Frame, state: &mut AppState, area: Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(MAUVE));
     
-    if state.detail_mode == DetailMode::Commit {
-        let text = build_commit_details(state);
-        let p = Paragraph::new(text)
-            .block(block)
-            .style(Style::default().fg(CREAM))
-            .wrap(Wrap { trim: false })
-            .scroll((0, 0));
-        f.render_widget(p, area);
-        return;
-    }
-    
     let text = match state.detail_mode {
         DetailMode::Detail => string_to_lines(&build_detail(state)),
         DetailMode::Status => string_to_lines(&state
@@ -616,18 +605,18 @@ fn render_detail(f: &mut Frame, state: &mut AppState, area: Rect) {
             let diff = state.repo.commit_diff(state.commit_diff_spec.as_deref().unwrap_or("")).unwrap_or_else(|e| format!("Error: {}", e));
             diff_to_lines(diff)
         }
+        DetailMode::Commit => {
+            let items = build_commit_details(state);
+            let p = Paragraph::new(items)
+                .block(block)
+                .style(Style::default().fg(CREAM))
+                .wrap(Wrap { trim: false })
+                .scroll((state.commit_detail_scroll, 0));
+            f.render_widget(p, area);
+            return;
+        }
         _ => vec![Line::from(Span::styled(String::new(), Style::default().fg(CREAM)))],
     };
-    if state.detail_mode == DetailMode::Commit {
-        let items = build_commit_details(state);
-        let p = Paragraph::new(items)
-            .block(block)
-            .style(Style::default().fg(CREAM))
-            .wrap(Wrap { trim: false })
-            .scroll((state.commit_detail_scroll, 0));
-        f.render_widget(p, area);
-        return;
-    }
     let p = Paragraph::new(text)
         .block(block)
         .style(Style::default().fg(CREAM))
@@ -757,12 +746,12 @@ fn build_detail(state: &AppState) -> String {
         }
         None => { out.push_str("No remotes configured.\n\nPress [a] to add a remote."); }
     }
-    out.push_str("\nBranch actions (focus Branches):\n");
-    out.push_str("  [c] Create   [m] Rename   [x] Delete   [Space] toggle\n");
-    out.push_str("\nGit features (focus Detail / Files):\n");
-    out.push_str("  [g] Git Graph  [b] Blame  [d] Diff  [F] Files  [s] Status\n");
-    out.push_str("  [A] Amend  [R] Revert  [Z] Reset  [P] Cherry-pick  [C] Commit\n");
-    out.push_str("\nLog:\n");
+out.push_str("\nBranch actions (focus Branches):\n");
+out.push_str("  [c] Create   [m] Rename   [x] Delete   [Space] toggle\n");
+out.push_str("\nGit features (focus Detail / Files):\n");
+out.push_str("  [g] Git Graph  [b] Blame  [d] Diff  [F] Files  [s] Status\n");
+out.push_str("  [A] Amend  [R] Revert  [Z] Reset  [C] Commit\n");
+out.push_str("\nLog:\n");
     let start = state.log.len().saturating_sub(10);
     for line in &state.log[start..] { out.push_str(&format!("  {}\n", line)); }
     out
@@ -780,6 +769,7 @@ fn build_files(state: &AppState) -> String {
         }
         out.push_str("\n[S] on a file: stage if unstaged, unstage if staged.\n");
         out.push_str("[Enter] on a file: open its diff.\n");
+        out.push_str("[P] on a file: cherry-pick a commit.\n");
     }
     out
 }

@@ -871,10 +871,14 @@ fn diff_to_lines(diff: String) -> Vec<Line<'static>> {
 fn build_commit_details(state: &AppState) -> Vec<Line<'static>> {
     let mut out: Vec<Line> = Vec::new();
 
-    let sha = state.file_state.selected()
-        .and_then(|i| state.commit_items.get(i))
-        .and_then(|line| line.split_whitespace().next())
-        .unwrap_or("");
+    let sha = if state.files_show_commits {
+        state.file_state.selected()
+            .and_then(|i| state.commit_items.get(i))
+            .and_then(|line| line.split_whitespace().next())
+            .unwrap_or("")
+    } else {
+        state.commit_diff_spec.as_deref().unwrap_or("")
+    };
 
     if sha.is_empty() {
         out.push(Line::from(Span::styled("No commit selected. Use [v] in Files panel to view commits.", Style::default().fg(CREAM))));
@@ -1026,6 +1030,18 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                             _ => {}
                         }
                     }
+                    KeyCode::Char('v') => {
+                        state.files_show_commits = !state.files_show_commits;
+                        if state.files_show_commits {
+                            state.commit_items = state.repo.list_recent_commits(30).unwrap_or_default();
+                            state.file_state.select(Some(0));
+                            state.detail_mode = DetailMode::Commit;
+                            state.commit_detail_scroll = 0;
+                        } else {
+                            state.detail_mode = DetailMode::Detail;
+                            state.commit_items.clear();
+                        }
+                    }
                     _ => {}
                 }
 
@@ -1069,18 +1085,6 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                         KeyCode::Char('f') => state.action_fetch(),
                         KeyCode::Char('p') => state.action_push(),
                         KeyCode::Char('l') => state.action_pull(),
-KeyCode::Char('v') => {
-    state.files_show_commits = !state.files_show_commits;
-    if state.files_show_commits {
-        state.commit_items = state.repo.list_recent_commits(30).unwrap_or_default();
-        state.file_state.select(Some(0));
-        state.detail_mode = DetailMode::Commit;
-        state.commit_detail_scroll = 0;
-    } else {
-        state.detail_mode = DetailMode::Detail;
-        state.commit_items.clear();
-    }
-}
                         KeyCode::Char('P') => {
                             if !state.files_show_commits {
                                 if let Some(p) = state.selected_file_path() {
@@ -1106,19 +1110,19 @@ KeyCode::Char('v') => {
                                     if let Some(line) = state.commit_items.get(idx) {
                                         let sha = line.split_whitespace().next().unwrap_or("").to_string();
                                         if !sha.is_empty() {
-                                            state.commit_diff_spec = Some(sha);
-                                            state.detail_mode = DetailMode::CommitDiff;
+                                            state.commit_diff_spec = Some(sha.clone());
+                                            state.refresh();
                                         }
                                     }
                                 }
                             }
                         }
-                        KeyCode::Char('j') => {
+                        KeyCode::Char('j') | KeyCode::Down => {
                             if state.detail_mode == DetailMode::Commit {
                                 state.commit_detail_scroll = state.commit_detail_scroll.saturating_add(1);
                             }
                         }
-                        KeyCode::Char('k') => {
+                        KeyCode::Char('k') | KeyCode::Up => {
                             if state.detail_mode == DetailMode::Commit {
                                 state.commit_detail_scroll = state.commit_detail_scroll.saturating_sub(1);
                             }

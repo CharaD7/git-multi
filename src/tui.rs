@@ -104,6 +104,8 @@ struct AppState {
     detail_mode: DetailMode,
     commit_msg: String,
     commit_diff_spec: Option<String>,
+    files_show_commits: bool,
+    commit_items: Vec<String>,
     // Cached heavier views (refreshed on demand)
     blame: Vec<BlameLine>,
     blame_path: String,
@@ -132,6 +134,8 @@ impl AppState {
             detail_mode: DetailMode::Detail,
             commit_msg: String::new(),
             commit_diff_spec: None,
+            files_show_commits: false,
+            commit_items: Vec::new(),
             blame: Vec::new(),
             blame_path: String::new(),
             graph: None,
@@ -474,9 +478,9 @@ fn ui(f: &mut Frame, state: &mut AppState) {
     render_detail(f, state, inner[3]);
 
     let base = "[Tab] Focus  [↑/↓] Move  [Space] Toggle  [f] Fetch [p] Push [l] Pull  [M] Merge \
- [C] Commit  [a] Add remote  [c] Branch  [m] Rename  [x] Delete  [D] Default\n\
- [g] Git Graph  [b] Blame file  [d] Diff  [F] Files  [s] Status  [S] Stage/Unstage file  \
- [A] Amend  [R] Revert  [Z] Reset  [P] Cherry-pick  [v] Commits  ";
+  [C] Commit  [a] Add remote  [c] Branch  [m] Rename  [x] Delete  [D] Default\n\
+  [g] Git Graph  [b] Blame file  [d] Diff  [F] Files  [s] Status  [S] Stage/Unstage file  \
+  [A] Amend  [R] Revert  [Z] Reset  [P] Cherry-pick (Files only)  [v] Commits  ";
     let suffix = if state.autosave_ref_exists {
         "[O] Restore auto-save  "
     } else {
@@ -533,25 +537,35 @@ fn render_branches(f: &mut Frame, state: &AppState, area: Rect) {
 }
 
 fn render_files(f: &mut Frame, state: &AppState, area: Rect) {
-    let items: Vec<ListItem> = state
-        .files
-        .iter()
-        .map(|f| {
-            let staged = if f.staged == ' ' { " ".to_string() } else { format!("{}", f.staged) };
-            let un = if f.unstaged == ' ' { " ".to_string() } else { format!("{}", f.unstaged) };
-            let style = if f.staged != ' ' {
-                Style::default().fg(GREEN)
-            } else if f.unstaged != ' ' {
-                Style::default().fg(YELLOW)
-            } else {
-                Style::default().fg(GRAY)
-            };
-            ListItem::new(format!("{}|{}  {}", staged, un, f.path)).style(style)
-        })
-        .collect();
-    let title = if state.focus == Focus::Files { " Files (focused) " } else { " Files " };
+    let (items, title, count) = if state.files_show_commits {
+        let items: Vec<ListItem> = state
+            .commit_items
+            .iter()
+            .map(|c| ListItem::new(c.as_str()))
+            .collect();
+        (items, " Commits ", state.commit_items.len())
+    } else {
+        let items: Vec<ListItem> = state
+            .files
+            .iter()
+            .map(|f| {
+                let staged = if f.staged == ' ' { " ".to_string() } else { format!("{}", f.staged) };
+                let un = if f.unstaged == ' ' { " ".to_string() } else { format!("{}", f.unstaged) };
+                let style = if f.staged != ' ' {
+                    Style::default().fg(GREEN)
+                } else if f.unstaged != ' ' {
+                    Style::default().fg(YELLOW)
+                } else {
+                    Style::default().fg(GRAY)
+                };
+                ListItem::new(format!("{}|{}  {}", staged, un, f.path)).style(style)
+            })
+            .collect();
+        let title = if state.focus == Focus::Files { " Files (focused) " } else { " Files " };
+        (items, title, state.files.len())
+    };
     let block = Block::default()
-        .title(format!("{} [{} changed]", title, state.files.len()))
+        .title(format!("{} [{}]", title, count))
         .borders(Borders::ALL)
         .border_style(border_style(state.focus == Focus::Files));
     let list = List::new(items)
@@ -566,6 +580,18 @@ fn render_detail(f: &mut Frame, state: &mut AppState, area: Rect) {
         .title(state.detail_mode.title())
         .borders(Borders::ALL)
         .border_style(Style::default().fg(MAUVE));
+    
+    if state.detail_mode == DetailMode::Commit {
+        let text = build_commit_details(state);
+        let p = Paragraph::new(text)
+            .block(block)
+            .style(Style::default().fg(CREAM))
+            .wrap(Wrap { trim: false })
+            .scroll((0, 0));
+        f.render_widget(p, area);
+        return;
+    }
+    
     let text = match state.detail_mode {
         DetailMode::Detail => build_detail(state),
         DetailMode::Status => state
@@ -583,11 +609,11 @@ fn render_detail(f: &mut Frame, state: &mut AppState, area: Rect) {
             .unwrap_or_else(|e| format!("Error: {}", e)),
         DetailMode::Blame => build_blame(state),
         DetailMode::Graph => build_graph(state),
-        DetailMode::Commit => build_commit(state),
         DetailMode::CommitDiff => state
             .repo
             .commit_diff(state.commit_diff_spec.as_deref().unwrap_or(""))
             .unwrap_or_else(|e| format!("Error: {}", e)),
+        _ => String::new(),
     };
     let p = Paragraph::new(text)
         .block(block)
@@ -667,7 +693,7 @@ fn render_overlay(f: &mut Frame, state: &AppState) {
                 format!("\n{}", context)
             };
             modal(f, 85, 6, " Cherry-pick commit ",
-                &format!("Commit to cherry-pick (sha/ref):\n> {}\u{2588}{}\n\n[d] preview diff  [Enter] cherry-pick  [Esc] cancel", value, ctx_line), VIBRANT_PINK)
+                &format!("Commit to cherry-pick (sha/ref):\n> {}\u{2588}{}\n\n[space] cherry-pick  [d] preview diff  [Enter] accept  [Esc] cancel", value, ctx_line), VIBRANT_PINK)
         }
         Overlay::Message { text, is_error } => {
             let color = if *is_error { RED } else { GREEN };
@@ -811,14 +837,58 @@ fn build_graph(state: &AppState) -> String {
         .join("\n")
 }
 
-fn build_commit(state: &AppState) -> String {
+fn build_commit_details(state: &AppState) -> String {
     let mut out = String::new();
-    if let Ok(commits) = state.repo.list_recent_commits(30) {
-        out.push_str("Recent commits:\n\n");
-        for c in commits { out.push_str(&format!("  {}\n", c)); }
-    } else {
-        out.push_str("Unable to load commits\n");
+
+    let sha = state.file_state.selected()
+        .and_then(|i| state.commit_items.get(i))
+        .and_then(|line| line.split_whitespace().next())
+        .unwrap_or("");
+
+    if sha.is_empty() {
+        out.push_str("No commit selected. Use [v] in Files panel to view commits.\n");
+        return out;
     }
+
+    match state.repo.commit_detail(sha) {
+        Ok(detail) => {
+            out.push_str(&format!("Commit: {}\n", detail.short_id));
+            out.push_str(&format!("SHA:    {}\n", detail.id));
+            out.push_str(&format!("Author: {} <{}>\n", detail.author, detail.author_email));
+            out.push_str(&format!("Date:   {}\n", detail.author_date));
+            out.push_str(&format!("Committer: {} <{}>\n", detail.committer, detail.committer_date));
+            out.push_str(&format!("Message:\n  {}\n", detail.message.lines().next().unwrap_or("")));
+            if !detail.parents.is_empty() {
+                out.push_str(&format!("Parents: {}\n", detail.parents.join(", ")));
+            }
+        }
+        Err(e) => {
+            out.push_str(&format!("Error loading commit detail: {}\n", e));
+        }
+    }
+
+    out.push_str("\n── Diff ──\n");
+    match state.repo.commit_diff(sha) {
+        Ok(diff) => {
+            let lines: Vec<&str> = diff.lines().collect();
+            if lines.len() > 80 {
+                for line in &lines[..80] {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+                out.push_str(&format!("... ({} more lines)\n", lines.len() - 80));
+            } else {
+                for line in &lines {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
+        }
+        Err(e) => {
+            out.push_str(&format!("Error loading diff: {}\n", e));
+        }
+    }
+
     out
 }
 
@@ -889,7 +959,6 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                     KeyCode::Char('s') => state.detail_mode = DetailMode::Status,
                     KeyCode::Char('F') => { state.detail_mode = DetailMode::Files; state.refresh(); }
                     KeyCode::Char('d') => state.detail_mode = DetailMode::DiffUnstaged,
-                    KeyCode::Char('v') => state.detail_mode = DetailMode::Commit,
                     KeyCode::Char('b') => {
                         if let Some(p) = state.selected_file_path() {
                             state.load_blame(&p);
@@ -911,7 +980,14 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                         match state.focus {
                             Focus::Remotes => state.action_fetch(),
                             Focus::Files => {
-                                if let Some(p) = state.selected_file_path() {
+                                if state.files_show_commits {
+                                    if let Some(idx) = state.file_state.selected() {
+                                        if let Some(line) = state.commit_items.get(idx) {
+                                            state.commit_diff_spec = line.split_whitespace().next().map(|s| s.to_string());
+                                            state.detail_mode = DetailMode::CommitDiff;
+                                        }
+                                    }
+                                } else if let Some(p) = state.selected_file_path() {
                                     state.overlay = Overlay::DiffPath { value: p, mode: DiffMode::Unstaged };
                                 }
                             }
@@ -971,13 +1047,26 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                         KeyCode::Char('f') => state.action_fetch(),
                         KeyCode::Char('p') => state.action_push(),
                         KeyCode::Char('l') => state.action_pull(),
+KeyCode::Char('v') => {
+    state.files_show_commits = !state.files_show_commits;
+    if state.files_show_commits {
+        state.commit_items = state.repo.list_recent_commits(30).unwrap_or_default();
+        state.file_state.select(Some(0));
+        state.detail_mode = DetailMode::Commit;
+    } else {
+        state.detail_mode = DetailMode::Detail;
+        state.commit_items.clear();
+    }
+}
                         KeyCode::Char('P') => {
-                            if let Some(p) = state.selected_file_path() {
-                                let is_dirty = state.files.iter().any(|f| f.path == p && (f.staged != ' ' || f.unstaged != ' '));
-                                if is_dirty {
-                                    state.overlay = Overlay::CherryPick { value: p.clone(), context: format!("File: {} (dirty)", p) };
-                                } else {
-                                    state.overlay = Overlay::CherryPick { value: String::new(), context: String::new() };
+                            if !state.files_show_commits {
+                                if let Some(p) = state.selected_file_path() {
+                                    let is_dirty = state.files.iter().any(|f| f.path == p && (f.staged != ' ' || f.unstaged != ' '));
+                                    if is_dirty {
+                                        state.overlay = Overlay::CherryPick { value: p.clone(), context: format!("File: {} (dirty)", p) };
+                                    } else {
+                                        state.overlay = Overlay::CherryPick { value: String::new(), context: String::new() };
+                                    }
                                 }
                             }
                             return Ok(false);
@@ -988,21 +1077,23 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                         KeyCode::Char('f') => state.action_fetch(),
                         KeyCode::Char('p') => state.action_push(),
                         KeyCode::Char('l') => state.action_pull(),
+                        KeyCode::Enter => {
+                            if state.detail_mode == DetailMode::Commit {
+                                if let Some(idx) = state.file_state.selected() {
+                                    if let Some(line) = state.commit_items.get(idx) {
+                                        let sha = line.split_whitespace().next().unwrap_or("").to_string();
+                                        if !sha.is_empty() {
+                                            state.commit_diff_spec = Some(sha);
+                                            state.detail_mode = DetailMode::CommitDiff;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         _ => {}
                     },
                     Focus::Graph => match key.code {
                         KeyCode::Char('a') => { state.graph_all = !state.graph_all; state.load_graph(); }
-                        KeyCode::Char('P') => {
-                            if let Some(graph) = &state.graph {
-                                if let Some(idx) = state.graph_state.selected() {
-                                    if let Some(n) = graph.nodes.get(idx) {
-                                        let ctx = format!("Commit: {} by {} - {}", n.short_id, n.author, n.message.lines().next().unwrap_or(""));
-                                        state.overlay = Overlay::CherryPick { value: n.short_id.clone(), context: ctx };
-                                    }
-                                }
-                            }
-                            return Ok(false);
-                        }
                         _ => {}
                     },
                 }
@@ -1355,12 +1446,18 @@ fn handle_overlay(state: &mut AppState, key: crossterm::event::KeyEvent) -> bool
         }
         Overlay::CherryPick { value, context: _ } => {
             match code {
-                KeyCode::Enter => {
+                KeyCode::Char(' ') => {
                     let spec = value.trim().to_string();
                     if !spec.is_empty() {
                         state.do_cherry_pick(spec);
                         state.overlay = Overlay::Message { text: "Cherry-picked (see log)".to_string(), is_error: false };
+                    } else {
+                        state.overlay = Overlay::Message { text: "Enter a commit SHA/ref first".to_string(), is_error: true };
                     }
+                }
+                KeyCode::Enter => {
+                    state.overlay = Overlay::None;
+                    state.commit_diff_spec = None;
                 }
                 KeyCode::Char('d') => {
                     let spec = value.trim().to_string();

@@ -43,7 +43,7 @@ Launch the terminal user interface:
 ```bash
 git-multi --gui
 ```
-The GUI is a five-panel terminal UI: **Remotes | Branches | Files | Detail**, with an
+The GUI is a five-panel terminal UI: **Remotes | Branches | Files | Detail | Log**, with an
 interactive **Git Graph** mode. The remote, branch, and file lists auto-refresh on demand
 (`r`), so changes made inside or outside the app show up when you refresh.
 
@@ -59,10 +59,11 @@ Navigation & global keys:
 - `R` — revert a commit (enter a sha/ref)
 - `Z` — reset current branch (soft/mixed/hard, then a target)
 - `P` — cherry-pick a single commit onto HEAD (only in Files panel; press `d` in the overlay to preview the diff)
- - `g` — Git Graph (commit DAG with branch/tag/remote labels; `a` toggles all-refs; `Enter` cherry-picks the selected commit)
+- `g` — Git Graph (commit DAG with branch/tag/remote labels; `a` toggles all-refs; `Enter` cherry-picks the selected commit)
 - `b` — Blame the selected file (GitLens: author, commit, date per line)
 - `d` — Diff (unstaged), `F` — Files panel, `s` — Status view, `v` — Commits view
 - `S` — on a file: stage if unstaged, unstage if staged
+- `J` / `K` — scroll commit details in Detail pane (Commit mode)
 - `O` — restore from auto-save (merge the hidden safety snapshot back into the working tree)
 - `r` — force refresh, `q` — quit
 

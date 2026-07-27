@@ -107,6 +107,7 @@ struct AppState {
     commit_diff_spec: Option<String>,
     files_show_commits: bool,
     commit_items: Vec<String>,
+    commit_detail_scroll: u16,
     // Cached heavier views (refreshed on demand)
     blame: Vec<BlameLine>,
     blame_path: String,
@@ -137,6 +138,7 @@ impl AppState {
             commit_diff_spec: None,
             files_show_commits: false,
             commit_items: Vec::new(),
+            commit_detail_scroll: 0,
             blame: Vec::new(),
             blame_path: String::new(),
             graph: None,
@@ -622,7 +624,7 @@ fn render_detail(f: &mut Frame, state: &mut AppState, area: Rect) {
             .block(block)
             .style(Style::default().fg(CREAM))
             .wrap(Wrap { trim: false })
-            .scroll((0, 0));
+            .scroll((state.commit_detail_scroll, 0));
         f.render_widget(p, area);
         return;
     }
@@ -1010,8 +1012,11 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                                 if state.files_show_commits {
                                     if let Some(idx) = state.file_state.selected() {
                                         if let Some(line) = state.commit_items.get(idx) {
-                                            state.commit_diff_spec = line.split_whitespace().next().map(|s| s.to_string());
-                                            state.detail_mode = DetailMode::CommitDiff;
+                                            let sha = line.split_whitespace().next().map(|s| s.to_string());
+                                            state.commit_diff_spec = sha;
+                                            state.detail_mode = DetailMode::Commit;
+                                            state.focus = Focus::Detail;
+                                            state.commit_detail_scroll = 0;
                                         }
                                     }
                                 } else if let Some(p) = state.selected_file_path() {
@@ -1080,6 +1085,7 @@ KeyCode::Char('v') => {
         state.commit_items = state.repo.list_recent_commits(30).unwrap_or_default();
         state.file_state.select(Some(0));
         state.detail_mode = DetailMode::Commit;
+        state.commit_detail_scroll = 0;
     } else {
         state.detail_mode = DetailMode::Detail;
         state.commit_items.clear();
@@ -1115,6 +1121,16 @@ KeyCode::Char('v') => {
                                         }
                                     }
                                 }
+                            }
+                        }
+                        KeyCode::Char('j') => {
+                            if state.detail_mode == DetailMode::Commit {
+                                state.commit_detail_scroll = state.commit_detail_scroll.saturating_add(1);
+                            }
+                        }
+                        KeyCode::Char('k') => {
+                            if state.detail_mode == DetailMode::Commit {
+                                state.commit_detail_scroll = state.commit_detail_scroll.saturating_sub(1);
                             }
                         }
                         _ => {}

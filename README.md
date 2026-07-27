@@ -58,8 +58,8 @@ Navigation & global keys:
 - `A` — amend the last commit (enter a new message)
 - `R` — revert a commit (enter a sha/ref)
 - `Z` — reset current branch (soft/mixed/hard, then a target)
-- `P` — cherry-pick a single commit onto HEAD (press `d` in the overlay to preview the diff)
-- `g` — Git Graph (commit DAG with branch/tag/remote labels; `a` toggles all-refs; `Enter` cherry-picks the selected commit)
+- `P` — cherry-pick a single commit onto HEAD (only in Files panel; press `d` in the overlay to preview the diff)
+ - `g` — Git Graph (commit DAG with branch/tag/remote labels; `a` toggles all-refs; `Enter` cherry-picks the selected commit)
 - `b` — Blame the selected file (GitLens: author, commit, date per line)
 - `d` — Diff (unstaged), `F` — Files panel, `s` — Status view, `v` — Commits view
 - `S` — on a file: stage if unstaged, unstage if staged

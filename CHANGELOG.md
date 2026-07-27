@@ -27,10 +27,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or all refs, with one-key cherry-pick of any node.
 - CLI subcommands: `commit`, `diff`, `blame`, `log`, `graph`, `revert`, `reset`,
   `pick`, `stage`, `unstage`, `restore`.
+- Colored diff rendering in Details pane: red for deletions, green for additions,
+  yellow for hunk headers, cyan for file headers.
+- J/K keyboard navigation for scrolling commit details in Details pane.
+- Enter on a commit in Files panel shows commit details in Details pane.
 
 ### Changed
 - GUI is now a five-panel layout: `Remotes | Branches | Files | Detail`,
   with an interactive Git Graph mode.
+- Cherry-pick modal: `Space` triggers cherry-pick, `Enter` accepts changes.
+- `P` key for cherry-pick is only available in Files panel mode.
+- Details pane in Commit mode shows commit metadata + diff instead of commit list.
+- `v` toggle resets commit detail scroll when leaving commit view.
 
 ## [0.2.2] - 2026-07-12
 

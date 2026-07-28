@@ -463,7 +463,7 @@ pub fn run_tui() -> io::Result<()> {
 fn ui(f: &mut Frame, state: &mut AppState) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+        .constraints([Constraint::Min(0), Constraint::Length(3)])
         .split(f.area());
 
     let inner = Layout::default()
@@ -491,26 +491,10 @@ fn ui(f: &mut Frame, state: &mut AppState) {
         ""
     };
     let help = format!("{}{}[r] Refresh  [q] Quit", base, suffix);
-    let log_lines: Vec<String> = state.log.iter().rev().take(10).cloned().collect();
-    let log_text = if log_lines.is_empty() {
-        String::from("(log empty)")
-    } else {
-        log_lines.join("\n")
-    };
-    let log = Paragraph::new(log_text)
-        .block(Block::default().title(" Log ").borders(Borders::ALL).border_style(Style::default().fg(MAUVE)))
-        .style(Style::default().fg(CREAM).bg(Color::Rgb(50, 50, 50)));
     let footer = Paragraph::new(help)
-        .block(Block::default().borders(Borders::NONE))
+        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(CYAN)))
         .style(Style::default().fg(CREAM).bg(Color::Rgb(50, 50, 50)));
-
-    let log_footer = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(2)])
-        .split(layout[1]);
-
-    f.render_widget(log, log_footer[0]);
-    f.render_widget(footer, log_footer[1]);
+    f.render_widget(footer, layout[1]);
 
     render_overlay(f, state);
 }

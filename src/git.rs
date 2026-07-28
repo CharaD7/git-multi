@@ -91,7 +91,7 @@ impl GitRepo {
             .unwrap_or_else(|| self.repo.path());
 
         let status = Command::new("git")
-            .args(["fetch", "--connect-timeout=10", name])
+            .args(["fetch", name])
             .current_dir(workdir)
             .status()
             .map_err(GitMultiError::IoError)?;
@@ -480,7 +480,7 @@ impl GitRepo {
         }
 
         let workdir = self.repo.workdir().unwrap_or_else(|| self.repo.path());
-        let mut args: Vec<String> = vec!["fetch".to_string(), "--connect-timeout=10".to_string(), remote_name.to_string()];
+        let mut args: Vec<String> = vec!["fetch".to_string(), remote_name.to_string()];
         for b in branches {
             args.push(b.clone());
         }

@@ -1625,8 +1625,7 @@ fn handle_overlay(state: &mut AppState, key: crossterm::event::KeyEvent) -> bool
 Overlay::Message { .. } => {
              if code == KeyCode::Enter || code == KeyCode::Esc { state.overlay = Overlay::None; }
          }
-         Overlay::None => {}
-    }
+     }
     true
 }
 

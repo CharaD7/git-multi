@@ -493,7 +493,7 @@ fn ui(f: &mut Frame, state: &mut AppState) {
     let base = "[Tab] Focus  [↑/↓] Move  [Space] Toggle  [f] Fetch [p] Push [l] Pull  [M] Merge \
   [C] Commit  [a] Add remote  [c] Branch  [m] Rename  [x] Delete  [D] Default\n\
   [g] Git Graph  [b] Blame file  [d] Diff  [F] Files  [s] Status  [S] Stage/Unstage file  \
-  [A] Amend  [R] Revert  [Z] Reset  [P] Cherry-pick (Files only)  [v] Commits  ";
+  [A] Amend  [R] Revert  [Z] Reset  [P] Cherry-pick (Files only)  [v] Commits  [/] Search";
     let suffix = if state.autosave_ref_exists {
         "[O] Restore auto-save  "
     } else {
@@ -543,7 +543,7 @@ fn render_branches(f: &mut Frame, state: &AppState, area: Rect) {
             .map(|b| ListItem::new(b.as_str()))
             .collect()
     };
-    let title = if state.focus == Focus::Branches { " Branches (focused) " } else { " Branches " };
+    let title = if state.focus == Focus::Branches { " Branches (focused) [/] Search " } else { " Branches [/] Search " };
     let sel_count = state.selected_branches().len();
     let block = Block::default()
         .title(format!("{} [{} selected]", title, sel_count))
@@ -586,7 +586,9 @@ fn render_files(f: &mut Frame, state: &AppState, area: Rect) {
                 ListItem::new(format!("{}|{}  {}", staged, un, f.path)).style(style)
             })
             .collect();
-        let title = if state.focus == Focus::Files { " Files (focused) " } else { " Files " };
+        let title = if state.files_show_commits {
+            if state.focus == Focus::Files { " Commits (focused) [/] Search " } else { " Commits [/] Search " }
+        } else if state.focus == Focus::Files { " Files (focused) " } else { " Files " };
         (items, title, state.files.len())
     };
     let block = Block::default()

@@ -41,10 +41,12 @@ enum Overlay {
     CommitBody { value: String },
     AmendMsg { value: String },
     RevertCommit { value: String },
-    ResetCommit { value: String, mode: ResetMode },
-    DiffPath { value: String, mode: DiffMode },
+ResetCommit { value: String, mode: ResetMode },
     CherryPick { value: String, context: String },
-    Message { text: String, is_error: bool },
+    DiffPath { value: String, mode: DiffMode },
+    SearchCommit { value: String },
+    SearchBranch { value: String },
+    Message { text: String, is_error: bool }
 }
 
 /// Which detail panel mode is active.
@@ -111,8 +113,6 @@ struct AppState {
     commit_items: Vec<String>,
     filtered_commit_items: Vec<String>,
     commit_detail_scroll: u16,
-    search_query: String,
-    is_searching: bool,
     // Cached heavier views (refreshed on demand)
     blame: Vec<BlameLine>,
     blame_path: String,
@@ -146,8 +146,6 @@ impl AppState {
             commit_items: Vec::new(),
             filtered_commit_items: Vec::new(),
             commit_detail_scroll: 0,
-            search_query: String::new(),
-            is_searching: false,
             blame: Vec::new(),
             blame_path: String::new(),
             graph: None,
@@ -529,32 +527,44 @@ fn render_remotes(f: &mut Frame, state: &AppState, area: Rect) {
 }
 
 fn render_branches(f: &mut Frame, state: &AppState, area: Rect) {
-    let branch_items: Vec<ListItem> = if state.is_searching && !state.search_query.is_empty() {
-        state.branches.iter()
-            .filter(|(b, _)| b.contains(&state.search_query))
-            .map(|(b, sel)| {
-                let mark = if *sel { "[x]" } else { "[ ]" };
-                ListItem::new(format!("{} {}", mark, b))
-            })
-            .collect()
+    let search_query = if let Overlay::SearchBranch { value } = &state.overlay {
+        value
     } else {
-        state.branches.iter()
-            .map(|(b, sel)| {
-                let mark = if *sel { "[x]" } else { "[ ]" };
-                ListItem::new(format!("{} {}", mark, b))
-            })
-            .collect()
+        ""
     };
-    let title = if state.focus == Focus::Branches { " Branches (focused) [/] Search " } else { " Branches [/] Search " };
+    
+    let branch_items: Vec<ListItem> = {
+        if search_query.is_empty() && state.filtered_branches.is_empty() {
+            state.branches
+                .iter()
+                .map(|(b, sel)| {
+                    let mark = if *sel { "[x]" } else { "[ ]" };
+                    ListItem::new(format!("{} {}", mark, b))
+                })
+                .collect()
+        } else if search_query.is_empty() {
+            state.filtered_branches.iter()
+                .filter_map(|b| state.branches.iter().find(|(name, _)| name == b))
+                .map(|(b, sel)| {
+                    let mark = if *sel { "[x]" } else { "[ ]" };
+                    ListItem::new(format!("{} {}", mark, b))
+                })
+                .collect()
+        } else {
+            state.branches.iter()
+                .filter(|(b, _)| b.contains(search_query))
+                .map(|(b, sel)| {
+                    let mark = if *sel { "[x]" } else { "[ ]" };
+                    ListItem::new(format!("{} {}", mark, b))
+                })
+                .collect()
+        }
+    };
+    let title = if state.focus == Focus::Branches { " Branches (focused) " } else { " Branches " };
     let sel_count = state.selected_branches().len();
-    let search_bar = if state.is_searching {
-        format!("Search: {}\u{2588}", state.search_query)
-    } else {
-        String::new()
-    };
     let block = Block::default()
         .title(format!("{} [{} selected]", title, sel_count))
-        .title_bottom(format!("[c] Create  [m] Rename  [x] Delete  [Space] Toggle  [{}] Search", if state.is_searching { "Esc" } else { "/" }))
+        .title_bottom(" [c] Create  [m] Rename  [x] Delete  [Space] Toggle ")
         .borders(Borders::ALL)
         .border_style(border_style(state.focus == Focus::Branches));
     let branch_list = List::new(branch_items)
@@ -562,24 +572,31 @@ fn render_branches(f: &mut Frame, state: &AppState, area: Rect) {
         .highlight_style(Style::default().bg(MAUVE).fg(Color::Black))
         .highlight_symbol(">> ");
     f.render_stateful_widget(branch_list, area, &mut state.branch_state.clone());
-    if state.is_searching {
-        let search_area = Rect::new(area.x, area.y, area.width, 1);
-        let search_para = Paragraph::new(search_bar)
-            .style(Style::default().fg(CYAN));
-        f.render_widget(search_para, search_area);
-    }
 }
 
 fn render_files(f: &mut Frame, state: &AppState, area: Rect) {
     let (items, title, count) = if state.files_show_commits {
-        let commit_list = if state.filtered_commit_items.is_empty() {
-            &state.commit_items
+        let search_query = if let Overlay::SearchCommit { value } = &state.overlay {
+            value
         } else {
-            &state.filtered_commit_items
+            ""
+        };
+        
+        let commit_list: Vec<String> = if search_query.is_empty() && state.filtered_commit_items.is_empty() {
+            state.commit_items.clone()
+        } else {
+            if !search_query.is_empty() {
+                state.commit_items.iter()
+                    .filter(|c| c.contains(search_query))
+                    .cloned()
+                    .collect()
+            } else {
+                state.filtered_commit_items.clone()
+            }
         };
         let items: Vec<ListItem> = commit_list
             .iter()
-            .map(|c| ListItem::new(c.as_str()))
+            .map(|c| ListItem::new(c.clone()))
             .collect();
         (items, " Commits ", commit_list.len())
     } else {
@@ -600,14 +617,9 @@ fn render_files(f: &mut Frame, state: &AppState, area: Rect) {
             })
             .collect();
         let title = if state.files_show_commits {
-            if state.focus == Focus::Files { " Commits (focused) [/] Search " } else { " Commits [/] Search " }
+            if state.focus == Focus::Files { " Commits (focused) " } else { " Commits " }
         } else if state.focus == Focus::Files { " Files (focused) " } else { " Files " };
         (items, title, state.files.len())
-    };
-    let search_bar = if state.is_searching && state.files_show_commits {
-        format!("Search: {}\u{2588}", state.search_query)
-    } else {
-        String::new()
     };
     let block = Block::default()
         .title(format!("{} [{}]", title, count))
@@ -618,12 +630,6 @@ fn render_files(f: &mut Frame, state: &AppState, area: Rect) {
         .highlight_style(Style::default().bg(BLUE).fg(Color::Black))
         .highlight_symbol(">> ");
     f.render_stateful_widget(list, area, &mut state.file_state.clone());
-    if state.is_searching && state.files_show_commits {
-        let search_area = Rect::new(area.x, area.y, area.width, 1);
-        let search_para = Paragraph::new(search_bar)
-            .style(Style::default().fg(CYAN));
-        f.render_widget(search_para, search_area);
-    }
 }
 
 fn render_detail(f: &mut Frame, state: &mut AppState, area: Rect) {
@@ -747,6 +753,22 @@ fn render_overlay(f: &mut Frame, state: &AppState) {
 Overlay::Message { text, is_error } => {
              let color = if *is_error { RED } else { GREEN };
              modal(f, 70, 4, " Message ", &format!("{}\n\n[Enter/Esc to dismiss]", text), color)
+         }
+         Overlay::SearchCommit { value } => {
+             let prompt = if value.is_empty() {
+                 "Search commits by SHA or message:\n> \u{2588}".to_string()
+             } else {
+                 format!("Search commits by SHA or message:\n> {}\u{2588}", value)
+             };
+             modal(f, 70, 5, " Search Commits ", &prompt, CYAN)
+         }
+         Overlay::SearchBranch { value } => {
+             let prompt = if value.is_empty() {
+                 "Search branches by name:\n> \u{2588}".to_string()
+             } else {
+                 format!("Search branches by name:\n> {}\u{2588}", value)
+             };
+             modal(f, 70, 5, " Search Branches ", &prompt, CYAN)
          }
          Overlay::None => {}
     }
@@ -1047,12 +1069,10 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                     KeyCode::Char('/') => {
                         match state.focus {
                             Focus::Files if state.files_show_commits => {
-                                state.is_searching = true;
-                                state.search_query.clear();
+                                state.overlay = Overlay::SearchCommit { value: String::new() };
                             }
                             Focus::Branches => {
-                                state.is_searching = true;
-                                state.search_query.clear();
+                                state.overlay = Overlay::SearchBranch { value: String::new() };
                             }
                             _ => {}
                         }
@@ -1152,18 +1172,7 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                         KeyCode::Char('p') => state.action_push(),
                         KeyCode::Char('l') => state.action_pull(),
                         KeyCode::Char('/') => {
-                            state.is_searching = true;
-                            state.search_query.clear();
-                        }
-                        KeyCode::Char(c) if state.is_searching => {
-                            state.search_query.push(c);
-                        }
-                        KeyCode::Backspace if state.is_searching => {
-                            state.search_query.pop();
-                        }
-                        KeyCode::Esc if state.is_searching => {
-                            state.is_searching = false;
-                            state.search_query.clear();
+                            state.overlay = Overlay::SearchBranch { value: String::new() };
                         }
                         _ => {}
                     },
@@ -1186,19 +1195,8 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                         }
                         KeyCode::Char('/') => {
                             if state.files_show_commits {
-                                state.is_searching = true;
-                                state.search_query.clear();
+                                state.overlay = Overlay::SearchCommit { value: String::new() };
                             }
-                        }
-                        KeyCode::Char(c) if state.is_searching && state.files_show_commits => {
-                            state.search_query.push(c);
-                        }
-                        KeyCode::Backspace if state.is_searching && state.files_show_commits => {
-                            state.search_query.pop();
-                        }
-                        KeyCode::Esc if state.is_searching => {
-                            state.is_searching = false;
-                            state.search_query.clear();
                         }
                         _ => {}
                     },
@@ -1624,6 +1622,56 @@ fn handle_overlay(state: &mut AppState, key: crossterm::event::KeyEvent) -> bool
         }
 Overlay::Message { .. } => {
              if code == KeyCode::Enter || code == KeyCode::Esc { state.overlay = Overlay::None; }
+         }
+         Overlay::SearchCommit { value } => {
+             match code {
+                 KeyCode::Enter => {
+                     let query = value.trim().to_string();
+                     if !query.is_empty() {
+                         state.filtered_commit_items = state.commit_items.iter()
+                             .filter(|c| c.contains(&query))
+                             .cloned()
+                             .collect();
+                     } else {
+                         state.filtered_commit_items = state.commit_items.clone();
+                     }
+                     state.overlay = Overlay::None;
+                 }
+                 KeyCode::Char(c) => { value.push(c); }
+                 KeyCode::Backspace => { value.pop(); }
+                 KeyCode::Esc => {
+                     state.overlay = Overlay::None;
+                     state.filtered_commit_items = state.commit_items.clone();
+                 }
+                 _ => {}
+             }
+         }
+         Overlay::SearchBranch { value } => {
+             match code {
+                 KeyCode::Enter => {
+                     let query = value.trim().to_string();
+                     if !query.is_empty() {
+                         state.filtered_branches = state.branches.iter()
+                             .filter(|(b, _)| b.contains(&query))
+                             .map(|(b, _)| b.clone())
+                             .collect();
+                     } else {
+                         state.filtered_branches = state.branches.iter()
+                             .map(|(b, _)| b.clone())
+                             .collect();
+                     }
+                     state.overlay = Overlay::None;
+                 }
+                 KeyCode::Char(c) => { value.push(c); }
+                 KeyCode::Backspace => { value.pop(); }
+                 KeyCode::Esc => {
+                     state.overlay = Overlay::None;
+                     state.filtered_branches = state.branches.iter()
+                         .map(|(b, _)| b.clone())
+                         .collect();
+                 }
+                 _ => {}
+             }
          }
      }
     true

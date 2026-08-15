@@ -10,12 +10,13 @@ use error::*;
 use git::*;
 
 use clap::Parser;
+use clap::CommandFactory;
+use clap_complete::{generate, Shell};
 use console::style;
 use dialoguer::Confirm;
+use std::io;
 use std::process;
-use tracing::{info, warn};
-
-fn main() {
+use tracing::info;fn main() {
     let cli = Cli::parse();
     
     if cli.gui {
@@ -48,8 +49,8 @@ fn run(cli: &Cli) -> Result<()> {
     if let Some(command) = &cli.command {
         match command {
             Commands::Init => cmd_init(),
-            Commands::Remote { command } => cmd_remote(command),
-            Commands::Branch { command } => cmd_branch(command),
+            Commands::Remote { command } => cmd_remote(command, cli.json),
+            Commands::Branch { command } => cmd_branch(command, cli.json),
             Commands::Fetch { all, remote, branches, all_branches } => {
                 cmd_fetch(*all, remote.clone(), branches.clone(), *all_branches)
             }
@@ -72,28 +73,28 @@ fn run(cli: &Cli) -> Result<()> {
                 cmd_pr(remote.clone(), base.clone(), head.clone(), title.clone(), description.clone(), *open)
             }
             Commands::Use { remote } => cmd_use(remote.clone()),
-            Commands::Status => cmd_status(),
-            Commands::List => cmd_list(),
+            Commands::Status => cmd_status(cli.json),
+            Commands::List => cmd_list(cli.json),
             Commands::Commit { subject, body, amend } => cmd_commit(subject.clone(), body.clone(), *amend),
             Commands::Diff { what, path } => cmd_diff(what.clone(), path.clone()),
             Commands::Blame { path, commit } => cmd_blame(path.clone(), commit.clone()),
             Commands::Log { path, count } => cmd_log(path.clone(), *count),
-            Commands::Graph { all, limit } => cmd_graph(*all, *limit),
+            Commands::Graph { all, limit } => cmd_graph(*all, *limit, cli.json),
             Commands::Revert { commit } => cmd_revert(commit.clone()),
             Commands::Reset { mode, target } => cmd_reset(mode.clone(), target.clone()),
             Commands::Pick { commit } => cmd_pick(commit.clone()),
             Commands::Stage { path } => {
-                GitRepo::open()?.stage_file(&path)?;
+                GitRepo::open()?.stage_file(path.as_str())?;
                 println!("{}", style(format!("Staged: {}", path)).green());
                 Ok(())
             }
             Commands::Unstage { path } => {
-                GitRepo::open()?.unstage_file(&path)?;
+                GitRepo::open()?.unstage_file(path.as_str())?;
                 println!("{}", style(format!("Unstaged: {}", path)).green());
                 Ok(())
             }
             Commands::Restore { path } => {
-                GitRepo::open()?.restore_file(&path)?;
+                GitRepo::open()?.restore_file(path.as_str())?;
                 println!("{}", style(format!("Restored: {}", path)).green());
                 Ok(())
             }
@@ -102,11 +103,24 @@ fn run(cli: &Cli) -> Result<()> {
                     .map_err(|e| crate::error::GitMultiError::SyncError(e.to_string()))?;
                 Ok(())
             }
+            Commands::Stash { command } => cmd_stash(command),
+            Commands::Tag { command } => cmd_tag(command),
+            Commands::Reflog { count } => cmd_reflog(*count),
+            Commands::Completions { shell } => cmd_completions(*shell),
         }
     } else {
         println!("No command specified. Use --help for usage.");
         Ok(())
     }
+}
+
+// ========== JSON helpers ==========
+
+fn print_json(value: &serde_json::Value) -> Result<()> {
+    let s = serde_json::to_string_pretty(value)
+        .map_err(|e| GitMultiError::SyncError(e.to_string()))?;
+    println!("{}", s);
+    Ok(())
 }
 
 // ========== INIT ==========
@@ -121,7 +135,7 @@ fn cmd_init() -> Result<()> {
 
 // ========== REMOTE ==========
 
-fn cmd_remote(command: &RemoteCommands) -> Result<()> {
+fn cmd_remote(command: &RemoteCommands, json: bool) -> Result<()> {
     match command {
         RemoteCommands::Add { name, url, default } => {
             let mut repo = GitRepo::open()?;
@@ -141,13 +155,10 @@ fn cmd_remote(command: &RemoteCommands) -> Result<()> {
         RemoteCommands::Remove { name, force } => {
             let mut repo = GitRepo::open()?;
             
-            if !*force {
-                let confirm = Confirm::new()
-                    .with_prompt(format!("Remove remote '{}'? This cannot be undone.", name))
-                    .interact()?;
-                if !confirm {
-                    return Ok(());
-                }
+            if !*force
+                && !confirm(&format!("Remove remote '{}'? This cannot be undone.", name))?
+            {
+                return Ok(());
             }
             
             repo.remove_remote(name)?;
@@ -162,7 +173,22 @@ fn cmd_remote(command: &RemoteCommands) -> Result<()> {
                 let names = repo.list_remotes()?;
                 names.into_iter().map(|n| (n, "".to_string())).collect()
             };
-            
+
+            if json {
+                let default = repo.config.get_default_remote().cloned();
+                let items: Vec<serde_json::Value> = remotes
+                    .iter()
+                    .map(|(name, url)| {
+                        serde_json::json!({
+                            "name": name,
+                            "url": url,
+                            "is_default": default.as_deref() == Some(name.as_str()),
+                        })
+                    })
+                    .collect();
+                return print_json(&serde_json::json!({ "remotes": items }));
+            }
+
             println!("Remotes:");
             for (name, url) in remotes {
                 let default_marker = if repo.config.get_default_remote() == Some(&name) {
@@ -219,6 +245,14 @@ fn cmd_remote(command: &RemoteCommands) -> Result<()> {
             let repo = GitRepo::open()?;
             let remote = repo.repo.find_remote(name)?;
 
+            if json {
+                return print_json(&serde_json::json!({
+                    "name": name,
+                    "url": remote.url().unwrap_or("unknown"),
+                    "push_url": remote.pushurl().unwrap_or(""),
+                }));
+            }
+
             println!("Remote: {}", style(name).cyan().bold());
             println!("URL: {}", remote.url().unwrap_or("unknown"));
 
@@ -243,6 +277,15 @@ fn cmd_remote(command: &RemoteCommands) -> Result<()> {
         }
         RemoteCommands::ListNames {} => {
             let repo = GitRepo::open()?;
+            if json {
+                let names: Vec<String> = repo
+                    .config
+                    .get_remote_names()
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                return print_json(&serde_json::json!({ "remotes": names }));
+            }
             for name in repo.config.get_remote_names() {
                 println!("{}", name);
             }
@@ -253,20 +296,35 @@ fn cmd_remote(command: &RemoteCommands) -> Result<()> {
 
 // ========== BRANCH ==========
 
-fn cmd_branch(command: &BranchCommands) -> Result<()> {
+fn cmd_branch(command: &BranchCommands, json: bool) -> Result<()> {
     match command {
         BranchCommands::List { all, remote } => {
             let repo = GitRepo::open()?;
             
             if let Some(remote_name) = remote {
                 let branches = repo.list_remote_branches(remote_name)?;
+                if json {
+                    return print_json(&serde_json::json!({ "remote": remote_name, "branches": branches }));
+                }
                 println!("Branches on remote '{}':", style(remote_name).cyan());
                 for branch in branches {
                     println!("  {}", style(&branch).green());
                 }
             } else if *all {
                 let info = repo.list_all_branches()?;
-                
+                if json {
+                    let mut remote_map = serde_json::Map::new();
+                    for (rname, brs) in &info.remote {
+                        remote_map.insert(
+                            rname.clone(),
+                            serde_json::json!(brs.iter().map(|b| &b.name).collect::<Vec<_>>()),
+                        );
+                    }
+                    return print_json(&serde_json::json!({
+                        "local": info.local.iter().map(|b| &b.name).collect::<Vec<_>>(),
+                        "remote": remote_map,
+                    }));
+                }
                 println!("Local branches:");
                 for branch in &info.local {
                     println!("  {}", style(branch.to_string()).green());
@@ -281,6 +339,11 @@ fn cmd_branch(command: &BranchCommands) -> Result<()> {
                 }
             } else {
                 let info = repo.list_all_branches()?;
+                if json {
+                    return print_json(&serde_json::json!({
+                        "local": info.local.iter().map(|b| &b.name).collect::<Vec<_>>(),
+                    }));
+                }
                 println!("Local branches:");
                 for branch in &info.local {
                     println!("  {}", style(branch.to_string()).green());
@@ -291,13 +354,10 @@ fn cmd_branch(command: &BranchCommands) -> Result<()> {
         BranchCommands::Delete { branch, force, remote } => {
             let repo = GitRepo::open()?;
             
-            if !*force {
-                let confirm = Confirm::new()
-                    .with_prompt(format!("Delete branch '{}'? This cannot be undone.", branch))
-                    .interact()?;
-                if !confirm {
-                    return Ok(());
-                }
+            if !*force
+                && !confirm(&format!("Delete branch '{}'? This cannot be undone.", branch))?
+            {
+                return Ok(());
             }
             
             if *remote {
@@ -397,12 +457,12 @@ fn cmd_pull(all: bool, remote: Option<String>, branches: Vec<String>, all_branch
     } else if let Some(remote_name) = remote {
         if !branches.is_empty() {
             repo.pull_branches(&remote_name, &branches)?;
-            println!("Pulled branches {:?} from '{}'", branches, style(&remote_name).green());
+            println!("Pulled/refreshed branches {:?} from '{}'", branches, style(&remote_name).green());
         } else if all_branches {
             repo.fetch_remote(&remote_name)?;
             let brs = repo.list_remote_branches(&remote_name)?;
             repo.pull_branches(&remote_name, &brs)?;
-            println!("Pulled all branches from '{}'", style(&remote_name).green());
+            println!("Pulled/refreshed all branches from '{}'", style(&remote_name).green());
         } else {
             // Default: pull current branch
             repo.pull_from_remote(&remote_name, None)?;
@@ -490,55 +550,86 @@ fn cmd_sync(
     to_remote: String,
     from_branch: String,
     to_branch: String,
-    commits: String,
-    strategy: SyncStrategy,
-    _force: bool,
+    commits: Option<String>,
+    strategy: Option<SyncStrategy>,
+    force: bool,
 ) -> Result<()> {
     let repo = GitRepo::open()?;
-    
+
+    let strategy = resolve_strategy(&repo, strategy);
+
     info!("Syncing from {}/{}", from_remote, from_branch);
     info!("Syncing to   {}/{}", to_remote, to_branch);
     info!("Strategy: {}", strategy);
-    info!("Commit range: {}", commits);
-    
-    // Parse source and destination
+
     let from_ref = format!("refs/remotes/{}/{}", from_remote, from_branch);
     let to_ref = format!("refs/remotes/{}/{}", to_remote, to_branch);
-    
+
+    // Fetch both remotes first so the remote-tracking refs are current.
+    repo.fetch_remote(&from_remote)?;
+    repo.fetch_remote(&to_remote)?;
+
+    // The destination local branch is based on the destination remote's tip
+    // when it exists, otherwise on the source tip (first-time sync).
+    let base_ref = if repo.repo.find_reference(&to_ref).is_ok() {
+        &to_ref
+    } else {
+        &from_ref
+    };
+    repo.ensure_local_branch(&to_branch, base_ref)?;
+    if repo.current_branch()?.as_deref() != Some(&to_branch) {
+        repo.checkout_branch(&to_branch)?;
+    }
+
+    // Resolve the commit range against the source tip.
+    let range = match &commits {
+        Some(r) if !r.trim().is_empty() => r.clone(),
+        _ => {
+            let tip = repo.repo.find_reference(&from_ref)?.peel_to_commit()?.id();
+            tip.to_string()
+        }
+    };
+
     match strategy {
         SyncStrategy::CherryPick => {
-            let picked = repo.cherry_pick_range(&from_ref, &to_ref, &commits)?;
+            let picked = repo.cherry_pick_range(&range, &to_branch)?;
             println!("Cherry-picked {} commit(s):", style(picked.len()).green());
             for sha in picked {
-                println!("  {}", style(&sha[..8]).cyan());
+                println!("  {}", style(&sha[..8.min(sha.len())]).cyan());
             }
         }
         SyncStrategy::Merge => {
-            // For merge, we need to fetch both branches first
-            repo.fetch_remote(&from_remote)?;
-            repo.fetch_remote(&to_remote)?;
-            
-            // Checkout target branch
-            repo.checkout_branch(&to_branch)?;
-            
-            // Merge source branch
-            repo.merge_branch(&from_branch)?;
-            println!("Merged '{}' into '{}'", style(&from_branch).green(), to_branch);
+            repo.merge_and_commit(&from_ref)?;
+            println!("Merged '{}/{}' into '{}'", style(&from_remote).cyan(), style(&from_branch).green(), to_branch);
         }
         SyncStrategy::Rebase => {
-            repo.fetch_remote(&from_remote)?;
-            repo.fetch_remote(&to_remote)?;
-            
-            // Checkout source branch
-            repo.checkout_branch(&from_branch)?;
-            
-            // Rebase onto target branch
-            repo.rebase_branch(&to_branch)?;
-            println!("Rebased '{}' onto '{}'", style(&from_branch).green(), to_branch);
+            repo.rebase_onto(&to_branch, &from_ref)?;
+            println!("Rebased '{}' onto '{}/{}'", style(&to_branch).green(), style(&from_remote).cyan(), from_branch);
         }
     }
-    
+
+    // Push the result to the destination remote.
+    if force {
+        repo.push_branches(&to_remote, std::slice::from_ref(&to_branch), true)?;
+        println!("Force-pushed '{}' to '{}'", style(&to_branch).green(), style(&to_remote).cyan());
+    } else {
+        repo.push_branches(&to_remote, std::slice::from_ref(&to_branch), false)?;
+        println!("Pushed '{}' to '{}'", style(&to_branch).green(), style(&to_remote).cyan());
+    }
+
     Ok(())
+}
+
+/// Pick the sync strategy from the CLI flag or the configured default.
+fn resolve_strategy(repo: &GitRepo, strategy: Option<SyncStrategy>) -> SyncStrategy {
+    if let Some(s) = strategy {
+        return s;
+    }
+    match repo.config.sync_preferences.default_strategy.as_str() {
+        "merge" => SyncStrategy::Merge,
+        "rebase" => SyncStrategy::Rebase,
+        _ => SyncStrategy::CherryPick,
+    }
 }
 
 // ========== MERGE ==========
@@ -563,7 +654,9 @@ fn cmd_merge(
     info!("Merging {}/{} into {}", from_remote, from_branch, target_branch);
 
     repo.fetch_remote(&from_remote)?;
-    repo.checkout_branch(&target_branch)?;
+    if repo.current_branch()?.as_deref() != Some(&target_branch) {
+        repo.checkout_branch(&target_branch)?;
+    }
     repo.merge_and_commit(&src_ref)?;
     println!(
         "Merged '{}/{}' into '{}'",
@@ -605,7 +698,7 @@ fn cmd_copy(from: String, to: Option<String>, files: Vec<String>, prune: bool) -
         from_branch
     };
     
-    let copied = repo.copy_files(&from_ref, &files)?;
+    let copied = repo.copy_files(&from_ref, &files, prune)?;
     
     println!("Copied {} file(s):", style(copied.len()).green());
     for file in copied {
@@ -613,7 +706,7 @@ fn cmd_copy(from: String, to: Option<String>, files: Vec<String>, prune: bool) -
     }
     
     if prune {
-        warn!("Prune option not yet implemented");
+        println!("{}", style("Pruned stale files not present in the source").yellow());
     }
     
     Ok(())
@@ -649,18 +742,12 @@ fn cmd_pr(
     info!("Head: {}", head_branch);
     info!("Title: {}", title);
     
-    repo.create_pr(&remote, &base, &head_branch, &title, description.as_deref())?;
+    repo.create_pr(&remote, &base, &head_branch, &title, description.as_deref(), open)?;
     
     println!("Pull request created successfully!");
     println!("  Repository: {}", style(&remote).cyan());
     println!("  Base: {} <- Head: {}", style(&base).green(), style(&head_branch).green());
     println!("  Title: {}", style(&title).yellow());
-    
-    if open {
-        // For now, just print a message
-        // Could use `gh pr view --web` to open in browser
-        println!("  Run `gh pr view --web` to open in browser");
-    }
     
     Ok(())
 }
@@ -679,9 +766,41 @@ fn cmd_use(remote: String) -> Result<()> {
 
 // ========== STATUS ==========
 
-fn cmd_status() -> Result<()> {
+fn cmd_status(json: bool) -> Result<()> {
     let repo = GitRepo::open()?;
-    
+
+    if json {
+        let remotes: Vec<serde_json::Value> = repo
+            .list_remotes_with_urls()?
+            .into_iter()
+            .map(|(name, url)| serde_json::json!({ "name": name, "url": url }))
+            .collect();
+        let local_branches: Vec<String> = repo
+            .list_all_branches()?
+            .local
+            .into_iter()
+            .map(|b| b.name)
+            .collect();
+        let files: Vec<serde_json::Value> = repo
+            .working_status()?
+            .into_iter()
+            .map(|f| {
+                serde_json::json!({
+                    "path": f.path,
+                    "staged": f.staged.to_string(),
+                    "unstaged": f.unstaged.to_string(),
+                })
+            })
+            .collect();
+        let current_branch = repo.current_branch()?.unwrap_or_default();
+        return print_json(&serde_json::json!({
+            "current_branch": current_branch,
+            "remotes": remotes,
+            "local_branches": local_branches,
+            "working_tree": files,
+        }));
+    }
+
     println!("Git Multi-Remote Status");
     println!("{}", "=".repeat(40));
     
@@ -714,10 +833,19 @@ fn cmd_status() -> Result<()> {
 
 // ========== LIST ==========
 
-fn cmd_list() -> Result<()> {
+fn cmd_list(json: bool) -> Result<()> {
     let repo = GitRepo::open()?;
     
     let remotes = repo.list_remotes()?;
+
+    if json {
+        let mut items = Vec::new();
+        for remote_name in remotes {
+            let branches = repo.list_remote_branches(&remote_name)?;
+            items.push(serde_json::json!({ "remote": remote_name, "branches": branches }));
+        }
+        return print_json(&serde_json::json!({ "remotes": items }));
+    }
     
     for remote_name in remotes {
         println!("\nRemote: {}", style(&remote_name).cyan().bold());
@@ -783,7 +911,7 @@ fn cmd_log(path: Option<String>, count: usize) -> Result<()> {
     match path {
         Some(p) => {
             for c in repo.file_history(&p)? {
-                println!("{}  {}  {}  {}", c.short_id, c.author, c.author_date, c.message);
+                println!("{}  {}  {}  {}", c.short_id, c.author, crate::git::format_timestamp(c.author_date), c.message);
             }
         }
         None => {
@@ -797,13 +925,33 @@ fn cmd_log(path: Option<String>, count: usize) -> Result<()> {
 
 // ========== GRAPH ==========
 
-fn cmd_graph(all: bool, limit: usize) -> Result<()> {
+fn cmd_graph(all: bool, limit: usize, json: bool) -> Result<()> {
     let repo = GitRepo::open()?;
+
+    if json {
+        let graph = repo.commit_graph(all, limit)?;
+        let nodes: Vec<serde_json::Value> = graph
+            .nodes
+            .into_iter()
+            .map(|n| {
+                serde_json::json!({
+                    "id": n.id,
+                    "short_id": n.short_id,
+                    "message": n.message,
+                    "author": n.author,
+                    "date": n.date,
+                    "refs": n.refs.iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        return print_json(&serde_json::json!({ "nodes": nodes }));
+    }
+
     let graph = repo.commit_graph(all, limit)?;
     for n in &graph.nodes {
         let refs: Vec<String> = n.refs.iter().map(|r| r.name.clone()).collect();
         let refstr = if refs.is_empty() { String::new() } else { format!("  ({})", refs.join(", ")) };
-        println!("* {:.8} {} {}  {}{}", n.id, n.author, n.date, n.message, refstr);
+        println!("* {:.8} {} {}  {}{}", n.id, n.author, crate::git::format_timestamp(n.date), n.message, refstr);
     }
     for r in &graph.detached_refs {
         println!("  ref {} ({:?})", r.name, r.kind);
@@ -841,4 +989,86 @@ fn cmd_pick(commit: String) -> Result<()> {
     repo.cherry_pick_commit(&commit)?;
     println!("{}", style(format!("Cherry-picked {}", commit)).green());
     Ok(())
+}
+
+// ========== STASH / TAG / REFLOG / COMPLETIONS ==========
+
+fn cmd_stash(command: &StashCommands) -> Result<()> {
+    let repo = GitRepo::open()?;
+    match command {
+        StashCommands::Save { message } => {
+            repo.stash_save(message.as_deref())?;
+            println!("{}", style("Working tree stashed").green());
+        }
+        StashCommands::Pop => {
+            repo.stash_pop()?;
+            println!("{}", style("Stash popped").green());
+        }
+        StashCommands::List => {
+            let stashes = repo.stash_list()?;
+            if stashes.is_empty() {
+                println!("(no stashes)");
+            } else {
+                for s in stashes {
+                    println!("  {}", style(&s).yellow());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_tag(command: &TagCommands) -> Result<()> {
+    let repo = GitRepo::open()?;
+    match command {
+        TagCommands::List => {
+            let tags = repo.list_tags()?;
+            if tags.is_empty() {
+                println!("(no tags)");
+            } else {
+                for t in tags {
+                    println!("  {}", style(&t).green());
+                }
+            }
+        }
+        TagCommands::Create { name, target, message } => {
+            let target = target.clone().unwrap_or_else(|| "HEAD".to_string());
+            repo.create_tag(name, &target, message.as_deref())?;
+            println!("{}", style(format!("Created tag '{}' at {}", name, target)).green());
+        }
+        TagCommands::Delete { name } => {
+            repo.delete_tag(name)?;
+            println!("{}", style(format!("Deleted tag '{}'", name)).green());
+        }
+    }
+    Ok(())
+}
+
+fn cmd_reflog(count: usize) -> Result<()> {
+    let repo = GitRepo::open()?;
+    for line in repo.reflog(count)? {
+        println!("{}", line);
+    }
+    Ok(())
+}
+
+fn cmd_completions(shell: Shell) -> Result<()> {
+    let mut cmd = Cli::command();
+    generate(shell, &mut cmd, "git-multi", &mut io::stdout());
+    Ok(())
+}
+
+// ========== CONFIRMATION ==========
+
+/// Prompt for confirmation, but fail cleanly in non-interactive contexts
+/// instead of hanging on a TTY read. Callers should offer `--force` instead.
+fn confirm(prompt: &str) -> Result<bool> {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        return Err(GitMultiError::SyncError(format!(
+            "{} (confirmation required in interactive mode; pass --force to skip)",
+            prompt
+        )));
+    }
+    Ok(Confirm::new().with_prompt(prompt).interact()?)
 }

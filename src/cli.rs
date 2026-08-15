@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 #[derive(Debug, Parser)]
 #[command(name = "git-multi")]
 #[command(author = "CharaD7")]
-#[command(version = "0.1.1")]
+#[command(version)]
 #[command(about = "A CLI tool for managing multiple Git remotes", long_about = None)]
 pub struct Cli {
     /// Increase verbosity
@@ -15,6 +15,10 @@ pub struct Cli {
     /// Launch GUI
     #[arg(short, long)]
     pub gui: bool,
+
+    /// Emit machine-readable JSON for status/list/graph/remote/branch output
+    #[arg(long, global = true)]
+    pub json: bool,
 
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -131,13 +135,14 @@ pub enum Commands {
         #[arg(long, value_name = "BRANCH", default_value = "main")]
         to_branch: String,
         
-        /// Commit range to sync (e.g., HEAD~3..HEAD, abc123..def456)
-        #[arg(short, long, value_name = "RANGE", default_value = "HEAD")]
-        commits: String,
+        /// Commit range to sync (e.g., HEAD~3..HEAD, abc123..def456).
+        /// Defaults to everything the destination is missing from the source.
+        #[arg(short, long, value_name = "RANGE")]
+        commits: Option<String>,
         
-        /// Sync strategy
-        #[arg(short, long, value_enum, default_value = "cherry-pick")]
-        strategy: SyncStrategy,
+        /// Sync strategy (defaults to the configured `default_strategy`)
+        #[arg(short, long, value_enum)]
+        strategy: Option<SyncStrategy>,
         
         /// Force sync (overwrite existing branch)
         #[arg(short, long)]
@@ -174,7 +179,7 @@ pub enum Commands {
         base: String,
         
         /// Head branch (current branch if not specified)
-        #[arg(short, long, value_name = "BRANCH")]
+        #[arg(long, value_name = "BRANCH")]
         head: Option<String>,
         
         /// PR title
@@ -334,6 +339,32 @@ pub enum Commands {
 
     /// Update git-multi to the latest GitHub Release (future implementation)
     SelfUpdate,
+
+    /// Manage the git stash
+    Stash {
+        #[command(subcommand)]
+        command: StashCommands,
+    },
+
+    /// Manage git tags
+    Tag {
+        #[command(subcommand)]
+        command: TagCommands,
+    },
+
+    /// Show the reflog
+    Reflog {
+        /// Number of entries
+        #[arg(short, long, default_value_t = 30)]
+        count: usize,
+    },
+
+    /// Generate shell completions for git-multi
+    Completions {
+        /// Target shell
+        #[arg(value_name = "SHELL")]
+        shell: clap_complete::Shell,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -476,6 +507,50 @@ pub enum SyncStrategy {
     Merge,
     /// Rebase onto target branch
     Rebase,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum StashCommands {
+    /// Stash the working tree (optionally with a message)
+    Save {
+        /// Stash message
+        #[arg(short, long, value_name = "MESSAGE")]
+        message: Option<String>,
+    },
+
+    /// Re-apply the most recent stash
+    Pop,
+
+    /// List stashes
+    List,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TagCommands {
+    /// List tags
+    List,
+
+    /// Create a tag
+    Create {
+        /// Tag name
+        #[arg(value_name = "NAME")]
+        name: String,
+
+        /// Target commit/ref (defaults to HEAD)
+        #[arg(value_name = "TARGET")]
+        target: Option<String>,
+
+        /// Annotate the tag with a message
+        #[arg(short, long, value_name = "MESSAGE")]
+        message: Option<String>,
+    },
+
+    /// Delete a tag
+    Delete {
+        /// Tag name
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
 }
 
 impl std::fmt::Display for SyncStrategy {

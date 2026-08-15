@@ -411,3 +411,18 @@ fn wait_with_timeout_update(child: &mut process::Child, timeout: Duration) -> Re
     let stderr = err_reader.and_then(|h| h.join().ok()).unwrap_or_default();
     Ok(process::Output { status, stdout, stderr })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cmp::Ordering;
+
+    #[test]
+    fn version_comparison() {
+        assert_eq!(compare_versions("1.2.3", "1.2.3"), Ordering::Equal);
+        assert_eq!(compare_versions("1.2.4", "1.2.3"), Ordering::Greater);
+        assert_eq!(compare_versions("1.2.3", "1.10.0"), Ordering::Less);
+        assert_eq!(compare_versions("1.2.3-beta", "1.2.3"), Ordering::Equal);
+        assert_eq!(compare_versions("2.0.0", "1.99.99"), Ordering::Greater);
+    }
+}

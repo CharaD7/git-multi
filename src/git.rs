@@ -1016,6 +1016,192 @@ impl GitRepo {
     }
 
     // ========================================================================
+    // Analytics & extra data (heatmaps, contributors, branch info, tags)
+    // ========================================================================
+
+    /// Commit counts by (weekday 0-6, hour 0-23) using local time, from the
+    /// most recent `max` commits. Index = weekday*24 + hour.
+    pub fn commit_activity(&self, max: usize) -> Result<[u32; 24 * 7]> {
+        let workdir = self.workdir();
+        let out = git_run_str(
+            workdir,
+            &[
+                "log",
+                "-n",
+                &max.to_string(),
+                "--date=format-local:%u:%H",
+                "--pretty=%cd",
+            ],
+        )?;
+        let mut counts = [0u32; 24 * 7];
+        for line in out.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = line.split(':').collect();
+            if parts.len() == 2 {
+                if let (Ok(wd), Ok(hour)) = (parts[0].parse::<usize>(), parts[1].parse::<usize>()) {
+                    // git %u is 1..=7 (Monday..Sunday) -> 0-based with Sunday last.
+                    let wd0 = wd % 7;
+                    let idx = wd0 * 24 + (hour % 24);
+                    counts[idx] = counts[idx].saturating_add(1);
+                }
+            }
+        }
+        Ok(counts)
+    }
+
+    /// Per-contributor commit stats via `git shortlog`, sorted by count desc.
+    /// Returns `(count, name, email)`.
+    pub fn shortlog(&self, all: bool) -> Result<Vec<(usize, String, String)>> {
+        let workdir = self.workdir();
+        let mut args: Vec<String> = vec!["shortlog".to_string(), "-sne".to_string(), "-n".to_string()];
+        if all {
+            args.push("--all".to_string());
+        }
+        let cargs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let out = git_run_str(workdir, &cargs)?;
+        let mut result = Vec::new();
+        for line in out.lines() {
+            // Format: "<count>\t<Name> <<email>>"
+            let line = line.trim();
+            let (count, rest) = match line.split_once('\t') {
+                Some((c, r)) => (c, r),
+                None => continue,
+            };
+            let count: usize = match count.parse() {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let (name, email) = match rest.rsplit_once('<') {
+                Some((n, e)) => (n.trim().to_string(), e.trim_end_matches('>').to_string()),
+                None => (rest.to_string(), String::new()),
+            };
+            result.push((count, name, email));
+        }
+        Ok(result)
+    }
+
+    /// A single branch's status for hovers: tip sha, subject, date, ahead/behind.
+    pub fn branch_info(&self, name: &str) -> Result<BranchStatus> {
+        let workdir = self.workdir();
+        let info = git_run_str(
+            workdir,
+            &[
+                "log",
+                "-1",
+                "--format=%H%x00%an%x00%aI%x00%s",
+                &format!("refs/heads/{}", name),
+            ],
+        )
+        .unwrap_or_default();
+        let mut status = BranchStatus {
+            name: name.to_string(),
+            last_sha: String::new(),
+            author: String::new(),
+            date: 0,
+            subject: String::new(),
+            ahead: 0,
+            behind: 0,
+        };
+        let fields: Vec<&str> = info.split('\0').collect();
+        if fields.len() == 4 {
+            status.last_sha = fields[0].to_string();
+            status.author = fields[1].to_string();
+            status.date = parse_iso_date(fields[2]);
+            status.subject = fields[3].to_string();
+        }
+        // ahead/behind vs the upstream, if configured.
+        if let Ok(out) = git_run_str(
+            workdir,
+            &[
+                "rev-list",
+                "--left-right",
+                "--count",
+                &format!("{}...@{{upstream}}", name),
+            ],
+        ) {
+            if let Some((left, right)) = out.trim().split_once('\t') {
+                status.ahead = left.trim().parse().unwrap_or(0);
+                status.behind = right.trim().parse().unwrap_or(0);
+            }
+        }
+        Ok(status)
+    }
+
+    /// Detailed tag list: `(name, short_sha, message)` sorted by date desc.
+    pub fn tag_detail(&self) -> Result<Vec<(String, String, String)>> {
+        let workdir = self.workdir();
+        let out = git_run_str(
+            workdir,
+            &[
+                "for-each-ref",
+                "--sort=-creatordate",
+                "--format=%(refname:short)%00%(objectname:short)%00%(contents:subject)",
+                "refs/tags",
+            ],
+        )
+        .unwrap_or_default();
+        let mut result = Vec::new();
+        for line in out.lines() {
+            let mut parts = line.split('\0');
+            let name = parts.next().unwrap_or("").to_string();
+            let sha = parts.next().unwrap_or("").to_string();
+            let msg = parts.next().unwrap_or("").to_string();
+            if !name.is_empty() {
+                result.push((name, sha, msg));
+            }
+        }
+        Ok(result)
+    }
+
+    /// Apply a stash entry by index (0 = latest).
+    pub fn stash_apply(&self, idx: usize) -> Result<()> {
+        let workdir = self.workdir();
+        git_run_str(workdir, &["stash", "apply", &format!("stash@{{{}}}", idx)])?;
+        Ok(())
+    }
+
+    /// Drop a stash entry by index (0 = latest).
+    pub fn stash_drop(&self, idx: usize) -> Result<()> {
+        let workdir = self.workdir();
+        git_run_str(workdir, &["stash", "drop", &format!("stash@{{{}}}", idx)])?;
+        Ok(())
+    }
+
+    /// `git rm` a file (or `-r` a directory).
+    pub fn git_rm(&self, path: &str) -> Result<()> {
+        let workdir = self.workdir();
+        git_run_str(workdir, &["rm", "-r", "--", path])?;
+        Ok(())
+    }
+
+    /// `git mv` a file/directory.
+    pub fn git_mv(&self, from: &str, to: &str) -> Result<()> {
+        let workdir = self.workdir();
+        git_run_str(workdir, &["mv", "--", from, to])?;
+        Ok(())
+    }
+
+    /// Remove untracked files (`git clean`). `force` implies `-fd`.
+    pub fn git_clean(&self, force: bool) -> Result<()> {
+        let workdir = self.workdir();
+        if force {
+            git_run_str(workdir, &["clean", "-fd"])?;
+        } else {
+            git_run_str(workdir, &["clean", "-f"])?;
+        }
+        Ok(())
+    }
+
+    /// Show an arbitrary ref/commit (`git show`), for the "show ref" action.
+    pub fn git_show(&self, refspec: &str) -> Result<String> {
+        let workdir = self.workdir();
+        git_run_str(workdir, &["show", "--no-color", "--stat", refspec])
+    }
+
+    // ========================================================================
     // Working-tree status & granular staging
     // ========================================================================
 
@@ -1183,6 +1369,7 @@ impl GitRepo {
                         date: String::new(),
                         summary: String::new(),
                         final_line: i + 1,
+                        epoch: 0,
                     })
                     .collect());
             }
@@ -1217,6 +1404,7 @@ impl GitRepo {
                     date: date.clone(),
                     summary: summary.clone(),
                     final_line: hunk.final_start_line() + i,
+                    epoch: when.seconds(),
                 });
             }
         }
@@ -1380,6 +1568,11 @@ impl GitRepo {
 
     fn workdir(&self) -> &std::path::Path {
         self.repo.workdir().unwrap_or_else(|| self.repo.path())
+    }
+
+    /// Public accessor for the repository working directory (used by `github`).
+    pub fn workdir_public(&self) -> &std::path::Path {
+        self.workdir()
     }
 
     fn collect_ref_labels(&self) -> Result<HashMap<String, Vec<RefLabel>>> {
@@ -1693,6 +1886,18 @@ pub struct FileStatus {
     pub in_workdir: bool,
 }
 
+/// Status of a single branch (tip + upstream ahead/behind).
+#[derive(Debug, Clone, Default)]
+pub struct BranchStatus {
+    pub name: String,
+    pub last_sha: String,
+    pub author: String,
+    pub date: i64,
+    pub subject: String,
+    pub ahead: usize,
+    pub behind: usize,
+}
+
 /// A line of blame output.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -1703,6 +1908,8 @@ pub struct BlameLine {
     pub date: String,
     pub summary: String,
     pub final_line: usize,
+    /// Raw author timestamp (epoch seconds), for heat/recency rendering.
+    pub epoch: i64,
 }
 
 /// A line in a unified diff.
@@ -1926,7 +2133,7 @@ impl GitRepo {
 //   * every command has a hard timeout, after which the child is killed.
 // ========================================================================
 
-const GIT_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const GIT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Run a program with piped stdout/stderr, capturing output, with a hard
 /// timeout. Never inherits the terminal, so an interactive prompt cannot hang
@@ -2053,4 +2260,41 @@ pub fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Result<Output>
     let stdout = out_reader.and_then(|h| h.join().ok()).unwrap_or_default();
     let stderr = err_reader.and_then(|h| h.join().ok()).unwrap_or_default();
     Ok(Output { status, stdout, stderr })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slug_from_url_forms() {
+        assert_eq!(
+            repo_slug_from_url("https://github.com/CharaD7/git-multi.git"),
+            Some("CharaD7/git-multi".to_string())
+        );
+        assert_eq!(
+            repo_slug_from_url("git@github.com:CharaD7/git-multi.git"),
+            Some("CharaD7/git-multi".to_string())
+        );
+        assert_eq!(
+            repo_slug_from_url("ssh://git@github.com/CharaD7/git-multi"),
+            Some("CharaD7/git-multi".to_string())
+        );
+        assert_eq!(repo_slug_from_url("https://github.com/CharaD7/"), None);
+        assert_eq!(repo_slug_from_url("not-a-url"), None);
+    }
+
+    #[test]
+    fn timestamp_iso_round_trip() {
+        let epoch = 1_704_067_200;
+        let formatted = format_timestamp(epoch);
+        assert_eq!(parse_iso_date(&formatted), epoch);
+    }
+
+    #[test]
+    fn hunk_header_parsing() {
+        assert_eq!(parse_hunk_header("@@ -1,5 +1,6 @@"), Some((1, 1)));
+        assert_eq!(parse_hunk_header("@@ -10 +11,2 @@"), Some((10, 11)));
+        assert_eq!(parse_hunk_header("not a hunk"), None);
+    }
 }

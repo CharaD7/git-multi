@@ -32,6 +32,64 @@ pub struct Config {
     pub default_remote: Option<String>,
     #[serde(default)]
     pub sync_preferences: SyncPreferences,
+    #[serde(default)]
+    pub gui: GuiPreferences,
+}
+
+/// GUI behaviour preferences (idle tips, previews, GitHub integration).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuiPreferences {
+    /// Show per-pane action tips after idling on a pane.
+    #[serde(default = "default_true")]
+    pub idle_tips: bool,
+    /// Seconds of idle before tips/previews appear.
+    #[serde(default = "default_idle_delay")]
+    pub idle_tip_delay_secs: u64,
+    /// Show hover previews (heat bars, branch info, ...) when idle.
+    #[serde(default = "default_true")]
+    pub idle_previews: bool,
+    /// GitHub backend: "auto" (gh CLI) or "gh".
+    #[serde(default = "default_github")]
+    pub github: String,
+    /// Fallback for contributor data when gh is unavailable.
+    #[serde(default = "default_fallback")]
+    pub contributors_fallback: String,
+    /// Default PR state filter in the PRs modal ("open", "closed", "merged").
+    #[serde(default = "default_pr_state")]
+    pub pr_default_state: String,
+}
+
+impl Default for GuiPreferences {
+    fn default() -> Self {
+        Self {
+            idle_tips: true,
+            idle_tip_delay_secs: 10,
+            idle_previews: true,
+            github: "auto".to_string(),
+            contributors_fallback: "shortlog".to_string(),
+            pr_default_state: "open".to_string(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_idle_delay() -> u64 {
+    10
+}
+
+fn default_github() -> String {
+    "auto".to_string()
+}
+
+fn default_fallback() -> String {
+    "shortlog".to_string()
+}
+
+fn default_pr_state() -> String {
+    "open".to_string()
 }
 
 /// Sync preferences for default behaviors

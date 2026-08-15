@@ -8,9 +8,10 @@ use ratatui::{
 };
 use std::collections::HashMap;
 use std::io;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use crate::git::{BlameLine, CommitGraph, DiffMode, FileStatus, ResetMode};
+use crate::git::{BlameLine, DiffMode, FileStatus, ResetMode};
 
 // Custom Palette
 const VIBRANT_PINK: Color = Color::Rgb(255, 105, 180);
@@ -94,6 +95,44 @@ struct RemoteEntry {
     url: String,
 }
 
+/// A blocking git operation handed off to the background worker thread so the
+/// UI never freezes while fetch/push/pull/merge/commit run.
+enum UiJob {
+    Fetch { remote: String, branches: Vec<String> },
+    Push { remote: String, branches: Vec<String> },
+    Pull { remote: String, branches: Vec<String> },
+    Merge { src_remote: String, src_branch: String, dest_remote: String, dest_branch: String },
+    Commit { subject: String, body: Option<String> },
+    Stage { path: String },
+    Unstage { path: String },
+    Amend { msg: String },
+    Revert { spec: String },
+    Reset { mode: ResetMode, spec: String },
+    CherryPick { spec: String },
+    AddRemote { name: String, url: String },
+    RenameRemote { old: String, new: String },
+    RemoveRemote { name: String },
+    DeleteBranch { name: String },
+    RenameBranch { old: String, new: String },
+    CreateBranch { name: String, base: String, remote: String },
+    SetDefault { name: String },
+    Autosave,
+}
+
+/// Outcome of a background job, applied on the UI thread.
+struct JobResult {
+    message: String,
+    refresh: bool,
+}
+
+/// One line of the ASCII git graph. Edge-only lines carry an empty `sha`.
+#[derive(Clone)]
+struct GraphLine {
+    sha: String,
+    text: String,
+    is_commit: bool,
+}
+
 struct AppState {
     repo: crate::git::GitRepo,
     remotes: Vec<RemoteEntry>,
@@ -116,17 +155,28 @@ struct AppState {
     // Cached heavier views (refreshed on demand)
     blame: Vec<BlameLine>,
     blame_path: String,
-    graph: Option<CommitGraph>,
+    graph_lines: Vec<GraphLine>,
     graph_all: bool,
     graph_state: ListState,
     last_activity: Instant,
     autosave_ref_exists: bool,
+    // Background worker plumbing
+    job_tx: mpsc::Sender<UiJob>,
+    result_rx: mpsc::Receiver<JobResult>,
+    busy: bool,
 }
 
 impl AppState {
     fn new() -> io::Result<Self> {
-        let repo = crate::git::GitRepo::open().map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        let repo = crate::git::GitRepo::open().map_err(|e| io::Error::other(e.to_string()))?;
         let autosave_ref_exists = repo.autosave_ref_exists() || repo.ensure_autosave_ref().is_ok();
+
+        // Spawn the background worker thread. It opens its own GitRepo per job
+        // (Repository is Send but the UI keeps its own instance for rendering).
+        let (job_tx, job_rx) = mpsc::channel::<UiJob>();
+        let (result_tx, result_rx) = mpsc::channel::<JobResult>();
+        std::thread::spawn(move || tui_worker(job_rx, result_tx));
+
         let mut state = Self {
             repo,
             remotes: Vec::new(),
@@ -148,11 +198,14 @@ impl AppState {
             commit_detail_scroll: 0,
             blame: Vec::new(),
             blame_path: String::new(),
-            graph: None,
+            graph_lines: Vec::new(),
             graph_all: false,
             graph_state: ListState::default(),
             last_activity: Instant::now(),
             autosave_ref_exists,
+            job_tx,
+            result_rx,
+            busy: false,
         };
         state.refresh();
         state.remote_state.select(Some(0));
@@ -238,18 +291,6 @@ impl AppState {
             .collect()
     }
 
-    fn select_remote_by_name(&mut self, name: &str) {
-        if let Some(i) = self.remotes.iter().position(|r| r.name == name) {
-            self.remote_state.select(Some(i));
-        }
-    }
-
-    fn select_branch_by_name(&mut self, name: &str) {
-        if let Some(i) = self.branches.iter().position(|(n, _)| n == name) {
-            self.branch_state.select(Some(i));
-        }
-    }
-
     fn log(&mut self, line: String) {
         self.log.push(line);
         if self.log.len() > 200 {
@@ -257,23 +298,46 @@ impl AppState {
         }
     }
 
+    /// Send a job to the background worker, if one is not already running.
+    fn submit_job(&mut self, job: UiJob, silent_when_busy: bool) {
+        if self.busy {
+            if !silent_when_busy {
+                self.log("An operation is already running".to_string());
+            }
+            return;
+        }
+        self.busy = true;
+        if let Err(e) = self.job_tx.send(job) {
+            self.busy = false;
+            self.log(format!("Failed to start background task: {}", e));
+        }
+    }
+
+    /// Drain finished background jobs onto the UI thread.
+    fn pump_jobs(&mut self) {
+        while let Ok(result) = self.result_rx.try_recv() {
+            self.busy = false;
+            self.last_activity = Instant::now();
+            if result.refresh {
+                self.refresh();
+            }
+            if !result.message.is_empty() {
+                self.log(result.message);
+            }
+        }
+    }
+
     fn action_fetch(&mut self) {
         if let Some(name) = self.selected_remote_name() {
             let selected = self.selected_branches();
-            let result = if selected.is_empty() {
+            let branches = if selected.is_empty() {
                 self.log(format!("Fetching all branches from '{}'", name));
-                self.repo.fetch_remote(&name)
+                Vec::new()
             } else {
                 self.log(format!("Fetching {:?} from '{}'", selected, name));
-                self.repo.fetch_branches(&name, &selected)
+                selected
             };
-            match result {
-                Ok(()) => {
-                    self.refresh();
-                    self.log(format!("Fetched from '{}'", name));
-                }
-                Err(e) => self.log(format!("Fetch '{}' failed: {}", name, e)),
-            }
+            self.submit_job(UiJob::Fetch { remote: name, branches }, false);
         } else {
             self.log("No remote selected".to_string());
         }
@@ -283,17 +347,11 @@ impl AppState {
         if let Some(name) = self.selected_remote_name() {
             let selected = self.selected_branches();
             if selected.is_empty() {
-                match self.repo.push_to_remote(&name, None) {
-                    Ok(()) => self.log(format!("Pushed current branch to '{}'", name)),
-                    Err(e) => self.log(format!("Push '{}' failed: {}", name, e)),
-                }
+                self.log(format!("Pushing current branch to '{}'", name));
             } else {
                 self.log(format!("Pushing {:?} to '{}'", selected, name));
-                match self.repo.push_branches(&name, &selected, false) {
-                    Ok(()) => self.log(format!("Pushed to '{}'", name)),
-                    Err(e) => self.log(format!("Push '{}' failed: {}", name, e)),
-                }
             }
+            self.submit_job(UiJob::Push { remote: name, branches: selected }, false);
         } else {
             self.log("No remote selected".to_string());
         }
@@ -303,112 +361,54 @@ impl AppState {
         if let Some(name) = self.selected_remote_name() {
             let selected = self.selected_branches();
             if selected.is_empty() {
-                match self.repo.pull_from_remote(&name, None) {
-                    Ok(()) => self.log(format!("Pulled current branch from '{}'", name)),
-                    Err(e) => self.log(format!("Pull '{}' failed: {}", name, e)),
-                }
+                self.log(format!("Pulling current branch from '{}'", name));
             } else {
                 self.log(format!("Pulling {:?} from '{}'", selected, name));
-                match self.repo.pull_branches(&name, &selected) {
-                    Ok(()) => self.log(format!("Pulled from '{}'", name)),
-                    Err(e) => self.log(format!("Pull '{}' failed: {}", name, e)),
-                }
             }
+            self.submit_job(UiJob::Pull { remote: name, branches: selected }, false);
         } else {
             self.log("No remote selected".to_string());
         }
     }
 
     fn action_merge_explicit(&mut self, src_remote: String, src_branch: String, dest_remote: String, dest_branch: String) {
-        let src_ref = format!("refs/remotes/{}/{}", src_remote, src_branch);
-        let result = self
-            .repo
-            .fetch_remote(&src_remote)
-            .and_then(|_| self.repo.fetch_remote(&dest_remote))
-            .and_then(|_| self.repo.checkout_branch(&dest_branch))
-            .and_then(|_| self.repo.merge_and_commit(&src_ref))
-            .and_then(|_| self.repo.push_to_remote(&dest_remote, Some(&dest_branch)));
-
-        match result {
-            Ok(()) => {
-                self.refresh();
-                self.log(format!(
-                    "Merged {}/{} into {}/{} and pushed",
-                    src_remote, src_branch, dest_remote, dest_branch
-                ));
-            }
-            Err(e) => self.log(format!("Merge failed: {}", e)),
-        }
+        self.log(format!("Merging {}/{} into {}/{} ...", src_remote, src_branch, dest_remote, dest_branch));
+        self.submit_job(UiJob::Merge { src_remote, src_branch, dest_remote, dest_branch }, false);
     }
 
-    fn action_commit(&mut self, subject: String, body: Option<&str>) {
-        match self.repo.create_commit(&subject, body) {
-            Ok(_) => {
-                self.refresh();
-                self.log(format!("Created commit: {}", subject));
-            }
-            Err(e) => self.log(format!("Commit failed: {}", e)),
-        }
+    fn action_commit(&mut self, subject: String, body: Option<String>) {
+        self.log(format!("Creating commit: {}", subject));
+        self.submit_job(UiJob::Commit { subject, body }, false);
     }
 
     fn do_stage(&mut self, path: &str) {
-        match self.repo.stage_file(path) {
-            Ok(()) => {
-                self.refresh();
-                self.log(format!("Staged: {}", path));
-            }
-            Err(e) => self.log(format!("Stage failed: {}", e)),
-        }
+        self.log(format!("Staging {}", path));
+        self.submit_job(UiJob::Stage { path: path.to_string() }, false);
     }
 
     fn do_unstage(&mut self, path: &str) {
-        match self.repo.unstage_file(path) {
-            Ok(()) => {
-                self.refresh();
-                self.log(format!("Unstaged: {}", path));
-            }
-            Err(e) => self.log(format!("Unstage failed: {}", e)),
-        }
+        self.log(format!("Unstaging {}", path));
+        self.submit_job(UiJob::Unstage { path: path.to_string() }, false);
     }
 
     fn do_amend(&mut self, msg: String) {
-        match self.repo.amend_commit(&msg, None) {
-            Ok(()) => {
-                self.refresh();
-                self.log("Amended last commit".to_string());
-            }
-            Err(e) => self.log(format!("Amend failed: {}", e)),
-        }
+        self.log("Amending last commit ...".to_string());
+        self.submit_job(UiJob::Amend { msg }, false);
     }
 
     fn do_revert(&mut self, spec: String) {
-        match self.repo.revert_commit(&spec) {
-            Ok(()) => {
-                self.refresh();
-                self.log(format!("Reverted {}", spec));
-            }
-            Err(e) => self.log(format!("Revert failed: {}", e)),
-        }
+        self.log(format!("Reverting {} ...", spec));
+        self.submit_job(UiJob::Revert { spec }, false);
     }
 
     fn do_reset(&mut self, mode: ResetMode, spec: String) {
-        match self.repo.reset(mode, &spec) {
-            Ok(()) => {
-                self.refresh();
-                self.log(format!("Reset ({:?}) to {}", mode, spec));
-            }
-            Err(e) => self.log(format!("Reset failed: {}", e)),
-        }
+        self.log(format!("Resetting ({:?}) to {} ...", mode, spec));
+        self.submit_job(UiJob::Reset { mode, spec }, false);
     }
 
     fn do_cherry_pick(&mut self, spec: String) {
-        match self.repo.cherry_pick_commit(&spec) {
-            Ok(()) => {
-                self.refresh();
-                self.log(format!("Cherry-picked {}", spec));
-            }
-            Err(e) => self.log(format!("Cherry-pick failed: {}", e)),
-        }
+        self.log(format!("Cherry-picking {} ...", spec));
+        self.submit_job(UiJob::CherryPick { spec }, false);
     }
 
     fn load_blame(&mut self, path: &str) {
@@ -423,14 +423,227 @@ impl AppState {
     }
 
     fn load_graph(&mut self) {
-        match self.repo.commit_graph(self.graph_all, 300) {
-            Ok(g) => {
-                self.graph = Some(g);
+        match self.repo.log_graph(self.graph_all, 300) {
+            Ok(lines) => {
+                self.graph_lines = lines.iter().filter_map(|l| parse_graph_line(l)).collect();
                 self.detail_mode = DetailMode::Graph;
                 self.graph_state.select(Some(0));
             }
             Err(e) => self.log(format!("Graph failed: {}", e)),
         }
+    }
+}
+
+/// Background worker: runs blocking git operations so the UI thread never
+/// freezes. Each job opens its own `GitRepo` (fresh from disk).
+fn tui_worker(job_rx: mpsc::Receiver<UiJob>, result_tx: mpsc::Sender<JobResult>) {
+    for job in job_rx {
+        let mut repo = match crate::git::GitRepo::open() {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = result_tx.send(JobResult {
+                    message: format!("Repo error: {}", e),
+                    refresh: false,
+                });
+                continue;
+            }
+        };
+        let result = handle_job(&mut repo, job);
+        let _ = result_tx.send(result);
+    }
+}
+
+fn handle_job(repo: &mut crate::git::GitRepo, job: UiJob) -> JobResult {
+    match job {
+        UiJob::Fetch { remote, branches } => {
+            let r = if branches.is_empty() {
+                repo.fetch_remote(&remote)
+            } else {
+                repo.fetch_branches(&remote, &branches)
+            };
+            match r {
+                Ok(()) => JobResult { message: format!("Fetched from '{}'", remote), refresh: true },
+                Err(e) => JobResult { message: format!("Fetch '{}' failed: {}", remote, e), refresh: false },
+            }
+        }
+        UiJob::Push { remote, branches } => {
+            let r = if branches.is_empty() {
+                repo.push_to_remote(&remote, None)
+            } else {
+                repo.push_branches(&remote, &branches, false)
+            };
+            match r {
+                Ok(()) => JobResult { message: format!("Pushed to '{}'", remote), refresh: true },
+                Err(e) => JobResult { message: format!("Push '{}' failed: {}", remote, e), refresh: false },
+            }
+        }
+        UiJob::Pull { remote, branches } => {
+            let r = if branches.is_empty() {
+                repo.pull_from_remote(&remote, None)
+            } else {
+                repo.pull_branches(&remote, &branches)
+            };
+            match r {
+                Ok(()) => JobResult { message: format!("Pulled from '{}'", remote), refresh: true },
+                Err(e) => JobResult { message: format!("Pull '{}' failed: {}", remote, e), refresh: false },
+            }
+        }
+        UiJob::Merge { src_remote, src_branch, dest_remote, dest_branch } => {
+            let src_ref = format!("refs/remotes/{}/{}", src_remote, src_branch);
+            let r = repo
+                .fetch_remote(&src_remote)
+                .and_then(|_| repo.fetch_remote(&dest_remote))
+                .and_then(|_| {
+                    if repo.current_branch()?.as_deref() != Some(&dest_branch) {
+                        repo.checkout_branch(&dest_branch)
+                    } else {
+                        Ok(())
+                    }
+                })
+                .and_then(|_| repo.merge_and_commit(&src_ref))
+                .and_then(|_| repo.push_to_remote(&dest_remote, Some(&dest_branch)));
+            match r {
+                Ok(()) => JobResult {
+                    message: format!("Merged {}/{} into {}/{} and pushed", src_remote, src_branch, dest_remote, dest_branch),
+                    refresh: true,
+                },
+                Err(e) => JobResult { message: format!("Merge failed: {}", e), refresh: false },
+            }
+        }
+        UiJob::Commit { subject, body } => match repo.create_commit(&subject, body.as_deref()) {
+            Ok(()) => JobResult { message: format!("Created commit: {}", subject), refresh: true },
+            Err(e) => JobResult { message: format!("Commit failed: {}", e), refresh: false },
+        },
+        UiJob::Stage { path } => match repo.stage_file(&path) {
+            Ok(()) => JobResult { message: format!("Staged: {}", path), refresh: true },
+            Err(e) => JobResult { message: format!("Stage failed: {}", e), refresh: false },
+        },
+        UiJob::Unstage { path } => match repo.unstage_file(&path) {
+            Ok(()) => JobResult { message: format!("Unstaged: {}", path), refresh: true },
+            Err(e) => JobResult { message: format!("Unstage failed: {}", e), refresh: false },
+        },
+        UiJob::Amend { msg } => match repo.amend_commit(&msg, None) {
+            Ok(()) => JobResult { message: "Amended last commit".to_string(), refresh: true },
+            Err(e) => JobResult { message: format!("Amend failed: {}", e), refresh: false },
+        },
+        UiJob::Revert { spec } => match repo.revert_commit(&spec) {
+            Ok(()) => JobResult { message: format!("Reverted {}", spec), refresh: true },
+            Err(e) => JobResult { message: format!("Revert failed: {}", e), refresh: false },
+        },
+        UiJob::Reset { mode, spec } => match repo.reset(mode, &spec) {
+            Ok(()) => JobResult { message: format!("Reset ({:?}) to {}", mode, spec), refresh: true },
+            Err(e) => JobResult { message: format!("Reset failed: {}", e), refresh: false },
+        },
+        UiJob::CherryPick { spec } => match repo.cherry_pick_commit(&spec) {
+            Ok(()) => JobResult { message: format!("Cherry-picked {}", spec), refresh: true },
+            Err(e) => JobResult { message: format!("Cherry-pick failed: {}", e), refresh: false },
+        },
+        UiJob::AddRemote { name, url } => match repo.add_remote(&name, &url) {
+            Ok(()) => JobResult { message: format!("Added remote '{}'", name), refresh: true },
+            Err(e) => JobResult { message: format!("Error: {}", e), refresh: false },
+        },
+        UiJob::RenameRemote { old, new } => match repo.rename_remote(&old, &new) {
+            Ok(()) => JobResult { message: format!("Renamed remote '{}' -> '{}'", old, new), refresh: true },
+            Err(e) => JobResult { message: format!("Error: {}", e), refresh: false },
+        },
+        UiJob::RemoveRemote { name } => match repo.remove_remote(&name) {
+            Ok(()) => JobResult { message: format!("Removed remote '{}'", name), refresh: true },
+            Err(e) => JobResult { message: format!("Error: {}", e), refresh: false },
+        },
+        UiJob::DeleteBranch { name } => match repo.delete_local_branch(&name, false) {
+            Ok(()) => JobResult { message: format!("Deleted branch '{}'", name), refresh: true },
+            Err(e) => JobResult { message: format!("Error: {}", e), refresh: false },
+        },
+        UiJob::RenameBranch { old, new } => match repo.rename_branch(&old, &new) {
+            Ok(()) => JobResult { message: format!("Renamed branch '{}' -> '{}'", old, new), refresh: true },
+            Err(e) => JobResult { message: format!("Error: {}", e), refresh: false },
+        },
+        UiJob::CreateBranch { name, base, remote } => {
+            let r = repo
+                .resolve_commit_spec(&base)
+                .and_then(|oid| Ok(repo.repo.find_commit(oid)?))
+                .and_then(|commit| {
+                    repo.repo.branch(&name, &commit, false)?;
+                    Ok(())
+                })
+                .and_then(|_| {
+                    if remote.is_empty() {
+                        Ok(())
+                    } else {
+                        repo.push_to_remote(&remote, Some(&name))
+                    }
+                });
+            match r {
+                Ok(()) => JobResult { message: format!("Created branch '{}'", name), refresh: true },
+                Err(e) => JobResult { message: format!("Error: {}", e), refresh: false },
+            }
+        }
+        UiJob::SetDefault { name } => {
+            let r = repo
+                .config
+                .set_default_remote(name.clone())
+                .and_then(|_| repo.config.save(&repo.repo));
+            match r {
+                Ok(()) => JobResult { message: format!("Default remote set to '{}'", name), refresh: true },
+                Err(e) => JobResult { message: format!("Error: {}", e), refresh: false },
+            }
+        }
+        UiJob::Autosave => match repo.write_autosave_snapshot() {
+            Ok(true) => JobResult { message: "[auto-save] snapshot captured".to_string(), refresh: true },
+            Ok(false) => JobResult { message: String::new(), refresh: false },
+            Err(_) => JobResult { message: "[auto-save] failed".to_string(), refresh: false },
+        },
+    }
+}
+
+/// Parse one line of `git log --graph --format=%H%x00%h%x00%an%x00%aI%x00%s%d`
+/// into a displayable graph line. Edge-only lines carry an empty sha.
+fn parse_graph_line(line: &str) -> Option<GraphLine> {
+    let fields: Vec<&str> = line.split('\0').collect();
+    let first = *fields.first()?;
+
+    // The leading graph characters end where the 40-char full sha begins.
+    let bytes = first.as_bytes();
+    let mut start = None;
+    let mut len = 0;
+    let mut sha_start = None;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b.is_ascii_hexdigit() {
+            if start.is_none() {
+                start = Some(i);
+            }
+            len += 1;
+            if len == 40 {
+                sha_start = Some(i - 39);
+                break;
+            }
+        } else {
+            start = None;
+            len = 0;
+        }
+    }
+
+    match sha_start {
+        Some(s) => {
+            let prefix = &first[..s];
+            let full_sha = &first[s..s + 40];
+            let short = fields.get(1).copied().unwrap_or("");
+            let author = fields.get(2).copied().unwrap_or("");
+            let date = fields.get(3).copied().unwrap_or("");
+            let subject = fields.get(4).copied().unwrap_or("");
+            let deco = fields.get(5).copied().unwrap_or("");
+            let text = format!(
+                "{}{} {} {} {}{}",
+                prefix,
+                short,
+                author,
+                crate::git::format_timestamp(crate::git::parse_iso_date(date)),
+                subject,
+                deco
+            );
+            Some(GraphLine { sha: full_sha.to_string(), text, is_commit: true })
+        }
+        None => Some(GraphLine { sha: String::new(), text: line.trim_end().to_string(), is_commit: false }),
     }
 }
 
@@ -446,22 +659,14 @@ pub fn run_tui() -> io::Result<()> {
 
     loop {
         terminal.draw(|f| ui(f, &mut state))?;
+        state.pump_jobs();
         if handle_events(&mut state)? {
             break;
         }
         if state.autosave_ref_exists
             && state.last_activity.elapsed() >= Duration::from_secs(30)
         {
-            match state.repo.write_autosave_snapshot() {
-                Ok(true) => {
-                    state.last_activity = Instant::now();
-                    state.log("[auto-save] snapshot captured".to_string());
-                }
-                Ok(false) => {
-                    state.last_activity = Instant::now();
-                }
-                Err(_) => {}
-            }
+            state.submit_job(UiJob::Autosave, true);
         }
     }
 
@@ -499,7 +704,8 @@ fn ui(f: &mut Frame, state: &mut AppState) {
     } else {
         ""
     };
-    let help = format!("{}{}[r] Refresh  [q] Quit", base, suffix);
+    let busy = if state.busy { "  [working…]" } else { "" };
+    let help = format!("{}{}[r] Refresh  [q] Quit{}", base, suffix, busy);
     let footer = Paragraph::new(help)
         .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(CYAN)))
         .style(Style::default().fg(CREAM).bg(Color::Rgb(50, 50, 50)));
@@ -584,15 +790,13 @@ fn render_files(f: &mut Frame, state: &AppState, area: Rect) {
         
         let commit_list: Vec<String> = if search_query.is_empty() && state.filtered_commit_items.is_empty() {
             state.commit_items.clone()
+        } else if !search_query.is_empty() {
+            state.commit_items.iter()
+                .filter(|c| c.contains(search_query))
+                .cloned()
+                .collect()
         } else {
-            if !search_query.is_empty() {
-                state.commit_items.iter()
-                    .filter(|c| c.contains(search_query))
-                    .cloned()
-                    .collect()
-            } else {
-                state.filtered_commit_items.clone()
-            }
+            state.filtered_commit_items.clone()
         };
         let items: Vec<ListItem> = commit_list
             .iter()
@@ -678,13 +882,15 @@ fn render_detail(f: &mut Frame, state: &mut AppState, area: Rect) {
     f.render_widget(p, area);
     if state.detail_mode == DetailMode::Graph {
         // Re-render graph as a list for selection highlight.
-        let items: Vec<ListItem> = graph_lines(state)
-            .into_iter()
-            .map(|(s, hot)| {
-                if hot {
-                    ListItem::new(s).style(Style::default().fg(YELLOW).add_modifier(Modifier::BOLD))
+        let items: Vec<ListItem> = state
+            .graph_lines
+            .iter()
+            .map(|gl| {
+                if gl.is_commit {
+                    ListItem::new(format!("{}  [Enter: pick, D: diff]", gl.text))
+                        .style(Style::default().fg(CREAM))
                 } else {
-                    ListItem::new(s).style(Style::default().fg(CREAM))
+                    ListItem::new(gl.text.clone()).style(Style::default().fg(GRAY))
                 }
             })
             .collect();
@@ -721,7 +927,7 @@ fn render_overlay(f: &mut Frame, state: &AppState) {
         Overlay::Merge { step, src_remote, src_branch, dest_remote, dest_branch } => {
             let prompt = match step {
                 0 => format!("Source remote:\n> {}\u{2588}", src_remote),
-                1 => format!("Source branch (from {}/{}):\n> {}\u{2588}", src_remote, src_remote, src_branch),
+                1 => format!("Source branch (from {}):\n> {}\u{2588}", src_remote, src_branch),
                 2 => format!("Destination remote:\n> {}\u{2588}", dest_remote),
                 _ => format!("Destination branch:\n> {}\u{2588}", dest_branch),
             };
@@ -737,8 +943,8 @@ fn render_overlay(f: &mut Frame, state: &AppState) {
             &format!("New message:\n> {}\u{2588}", value), YELLOW),
         Overlay::RevertCommit { value } => modal(f, 60, 4, " Revert commit ",
             &format!("Commit to revert (sha/ref):\n> {}\u{2588}", value), YELLOW),
-        Overlay::ResetCommit { value, mode } => modal(f, 65, 4, " Reset ",
-            &format!("Reset ({:?}) to (sha/ref):\n> {}\u{2588}", mode, value), YELLOW),
+        Overlay::ResetCommit { value, mode } => modal(f, 70, 5, " Reset ",
+            &format!("Mode: [1] soft  [2] mixed  [3] hard   (current: {:?})\nTarget (sha/ref):\n> {}\u{2588}", mode, value), YELLOW),
         Overlay::DiffPath { value, mode } => modal(f, 70, 4, " Diff file ",
             &format!("Diff ({:?}) for path:\n> {}\u{2588}", mode, value), CYAN),
         Overlay::CherryPick { value, context } => {
@@ -860,51 +1066,15 @@ fn build_blame(state: &AppState) -> String {
     out
 }
 
-fn graph_lines(state: &AppState) -> Vec<(String, bool)> {
-    let mut lines = Vec::new();
-    let Some(graph) = &state.graph else {
-        lines.push(("No graph loaded. Press [g].".to_string(), false));
-        return lines;
-    };
-    let sel = state.graph_state.selected().unwrap_or(0);
-    for (i, n) in graph.nodes.iter().enumerate() {
-        let refs: String = n
-            .refs
-            .iter()
-            .map(|r| {
-                let c = match r.kind {
-                    crate::git::RefKind::Local => GREEN,
-                    crate::git::RefKind::Remote => BLUE,
-                    crate::git::RefKind::Tag => YELLOW,
-                    crate::git::RefKind::Other => GRAY,
-                };
-                let _ = c;
-                format!(" {}", r.name)
-            })
-            .collect();
-        let line = format!(
-            "* {:.8} {} {}{}",
-            n.id,
-            n.author,
-            n.message.lines().next().unwrap_or(""),
-            refs
-        );
-        lines.push((line, i == sel));
-    }
-    if !graph.detached_refs.is_empty() {
-        lines.push(("── detached refs ──".to_string(), false));
-        for r in &graph.detached_refs {
-            lines.push((format!("  {} ({:?})", r.name, r.kind), false));
-        }
-    }
-    lines
-}
-
 fn build_graph(state: &AppState) -> String {
-    // Fallback text view (the list widget also renders selection).
-    graph_lines(state)
-        .into_iter()
-        .map(|(s, _)| s)
+    // Fallback text view (the list widget also renders selection + edges).
+    if state.graph_lines.is_empty() {
+        return "No graph loaded. Press [g].".to_string();
+    }
+    state
+        .graph_lines
+        .iter()
+        .map(|gl| gl.text.clone())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -1108,11 +1278,12 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                                 }
                             }
                             Focus::Graph => {
-                                if let Some(graph) = &state.graph {
-                                    if let Some(idx) = state.graph_state.selected() {
-                                        if let Some(n) = graph.nodes.get(idx) {
-                                            let ctx = format!("Commit: {} by {} - {}", n.short_id, n.author, n.message.lines().next().unwrap_or(""));
-                                            state.overlay = Overlay::CherryPick { value: n.short_id.clone(), context: ctx };
+                                if let Some(idx) = state.graph_state.selected() {
+                                    if let Some(gl) = state.graph_lines.get(idx) {
+                                        if gl.is_commit {
+                                            let short = gl.sha[..8.min(gl.sha.len())].to_string();
+                                            let ctx = gl.text.clone();
+                                            state.overlay = Overlay::CherryPick { value: short, context: ctx };
                                         }
                                     }
                                 }
@@ -1148,11 +1319,8 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                         }
                         KeyCode::Char('D') => {
                             if let Some(name) = state.selected_remote_name() {
-                                if state.repo.config.set_default_remote(name.clone()).is_ok() {
-                                    let _ = state.repo.config.save(&state.repo.repo);
-                                    state.refresh();
-                                    state.log(format!("Default remote set to '{}'", name));
-                                }
+                                state.log(format!("Setting default remote to '{}' ...", name));
+                                state.submit_job(UiJob::SetDefault { name }, false);
                             }
                         }
                         KeyCode::Char('f') => state.action_fetch(),
@@ -1184,11 +1352,23 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                             if !state.files_show_commits {
                                 if let Some(p) = state.selected_file_path() {
                                     let is_dirty = state.files.iter().any(|f| f.path == p && (f.staged != ' ' || f.unstaged != ' '));
-                                    if is_dirty {
-                                        state.overlay = Overlay::CherryPick { value: p.clone(), context: format!("File: {} (dirty)", p) };
+                                    // Pre-fill the HEAD sha (not the file path!) so
+                                    // Space cherry-picks a real commit onto HEAD.
+                                    let head_short = state
+                                        .repo
+                                        .head_commit()
+                                        .ok()
+                                        .map(|c| {
+                                            let s = c.id().to_string();
+                                            s[..8.min(s.len())].to_string()
+                                        })
+                                        .unwrap_or_default();
+                                    let (value, context) = if is_dirty {
+                                        (head_short.clone(), format!("File: {} (dirty) — picking {}", p, head_short))
                                     } else {
-                                        state.overlay = Overlay::CherryPick { value: String::new(), context: String::new() };
-                                    }
+                                        (String::new(), String::new())
+                                    };
+                                    state.overlay = Overlay::CherryPick { value, context };
                                 }
                             }
                             return Ok(false);
@@ -1236,6 +1416,17 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                     },
                     Focus::Graph => match key.code {
                         KeyCode::Char('a') => { state.graph_all = !state.graph_all; state.load_graph(); }
+                        KeyCode::Char('D') => {
+                            if let Some(idx) = state.graph_state.selected() {
+                                if let Some(gl) = state.graph_lines.get(idx) {
+                                    if gl.is_commit {
+                                        state.commit_diff_spec = Some(gl.sha.clone());
+                                        state.detail_mode = DetailMode::CommitDiff;
+                                        state.log(format!("Diff for {} shown in detail panel", &gl.sha[..8.min(gl.sha.len())]));
+                                    }
+                                }
+                            }
+                        }
                         _ => {}
                     },
                 }
@@ -1268,15 +1459,9 @@ fn handle_overlay(state: &mut AppState, key: crossterm::event::KeyEvent) -> bool
                     let url = value.trim().to_string();
                     if !url.is_empty() {
                         let nm = name.clone();
-                        match state.repo.add_remote(&nm, &url) {
-                            Ok(()) => {
-                                state.refresh();
-                                state.select_remote_by_name(&nm);
-                                state.log(format!("Added remote '{}'", nm));
-                                state.overlay = Overlay::Message { text: format!("Added remote '{}'", nm), is_error: false };
-                            }
-                            Err(e) => { state.overlay = Overlay::Message { text: format!("Error: {}", e), is_error: true }; }
-                        }
+                        state.submit_job(UiJob::AddRemote { name: nm.clone(), url }, false);
+                        state.log(format!("Adding remote '{}' ...", nm));
+                        state.overlay = Overlay::None;
                     }
                 }
                 KeyCode::Char(c) => value.push(c),
@@ -1291,15 +1476,9 @@ fn handle_overlay(state: &mut AppState, key: crossterm::event::KeyEvent) -> bool
                     let new = value.trim().to_string();
                     if !new.is_empty() {
                         let o = old.clone();
-                        match state.repo.rename_remote(&o, &new) {
-                            Ok(()) => {
-                                state.refresh();
-                                state.select_remote_by_name(&new);
-                                state.log(format!("Renamed remote '{}' -> '{}'", o, new));
-                                state.overlay = Overlay::Message { text: format!("Renamed remote '{}' -> '{}'", o, new), is_error: false };
-                            }
-                            Err(e) => { state.overlay = Overlay::Message { text: format!("Error: {}", e), is_error: true }; }
-                        }
+                        state.submit_job(UiJob::RenameRemote { old: o.clone(), new: new.clone() }, false);
+                        state.log(format!("Renaming remote '{}' -> '{}' ...", o, new));
+                        state.overlay = Overlay::None;
                     }
                 }
                 KeyCode::Char(c) => value.push(c),
@@ -1311,14 +1490,9 @@ fn handle_overlay(state: &mut AppState, key: crossterm::event::KeyEvent) -> bool
         Overlay::RemoveRemote { name } => {
             if matches!(code, KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter) {
                 let nm = name.clone();
-                match state.repo.remove_remote(&nm) {
-                    Ok(()) => {
-                        state.refresh();
-                        state.log(format!("Removed remote '{}'", nm));
-                        state.overlay = Overlay::Message { text: format!("Removed remote '{}'", nm), is_error: false };
-                    }
-                    Err(e) => { state.overlay = Overlay::Message { text: format!("Error: {}", e), is_error: true }; }
-                }
+                state.submit_job(UiJob::RemoveRemote { name: nm.clone() }, false);
+                state.log(format!("Removing remote '{}' ...", nm));
+                state.overlay = Overlay::None;
             } else if matches!(code, KeyCode::Char('n') | KeyCode::Esc) {
                 state.overlay = Overlay::None;
             }
@@ -1343,19 +1517,9 @@ fn handle_overlay(state: &mut AppState, key: crossterm::event::KeyEvent) -> bool
                         } else { base.trim().to_string() };
                         let rm = remote.trim().to_string();
                         if !nm.is_empty() {
-                            let res = state.repo.resolve_commit_spec(&base_spec)
-                                .and_then(|oid| Ok(state.repo.repo.find_commit(oid)?))
-                                .and_then(|commit| { state.repo.repo.branch(&nm, &commit, false)?; Ok(()) })
-                                .and_then(|_| if rm.is_empty() { Ok(()) } else { state.repo.push_to_remote(&rm, Some(&nm)) });
-                            match res {
-                                Ok(()) => {
-                                    state.refresh();
-                                    state.select_branch_by_name(&nm);
-                                    state.log(format!("Created branch '{}'", nm));
-                                    state.overlay = Overlay::Message { text: format!("Created branch '{}'", nm), is_error: false };
-                                }
-                                Err(e) => { state.overlay = Overlay::Message { text: format!("Error: {}", e), is_error: true }; }
-                            }
+                            state.log(format!("Creating branch '{}' ...", nm));
+                            state.submit_job(UiJob::CreateBranch { name: nm, base: base_spec, remote: rm }, false);
+                            state.overlay = Overlay::None;
                         }
                     }
                     _ => {}
@@ -1379,14 +1543,9 @@ fn handle_overlay(state: &mut AppState, key: crossterm::event::KeyEvent) -> bool
         Overlay::DeleteBranch { name } => {
             if matches!(code, KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter) {
                 let nm = name.clone();
-                match state.repo.delete_local_branch(&nm, false) {
-                    Ok(()) => {
-                        state.refresh();
-                        state.log(format!("Deleted branch '{}'", nm));
-                        state.overlay = Overlay::Message { text: format!("Deleted branch '{}'", nm), is_error: false };
-                    }
-                    Err(e) => { state.overlay = Overlay::Message { text: format!("Error: {}", e), is_error: true }; }
-                }
+                state.submit_job(UiJob::DeleteBranch { name: nm.clone() }, false);
+                state.log(format!("Deleting branch '{}' ...", nm));
+                state.overlay = Overlay::None;
             } else if matches!(code, KeyCode::Char('n') | KeyCode::Esc) {
                 state.overlay = Overlay::None;
             }
@@ -1397,15 +1556,9 @@ fn handle_overlay(state: &mut AppState, key: crossterm::event::KeyEvent) -> bool
                     let new = value.trim().to_string();
                     if !new.is_empty() {
                         let o = old.clone();
-                        match state.repo.rename_branch(&o, &new) {
-                            Ok(()) => {
-                                state.refresh();
-                                state.select_branch_by_name(&new);
-                                state.log(format!("Renamed branch '{}' -> '{}'", o, new));
-                                state.overlay = Overlay::Message { text: format!("Renamed branch '{}' -> '{}'", o, new), is_error: false };
-                            }
-                            Err(e) => { state.overlay = Overlay::Message { text: format!("Error: {}", e), is_error: true }; }
-                        }
+                        state.submit_job(UiJob::RenameBranch { old: o.clone(), new: new.clone() }, false);
+                        state.log(format!("Renaming branch '{}' -> '{}' ...", o, new));
+                        state.overlay = Overlay::None;
                     }
                 }
                 KeyCode::Char(c) => value.push(c),
@@ -1444,7 +1597,7 @@ fn handle_overlay(state: &mut AppState, key: crossterm::event::KeyEvent) -> bool
                             let dr = dest_remote.clone();
                             let db = dest_branch.clone();
                             state.action_merge_explicit(sr, sb, dr, db);
-                            state.overlay = Overlay::Message { text: "Merge complete (see log)".to_string(), is_error: false };
+                            state.overlay = Overlay::Message { text: "Merge started in background (see log)".to_string(), is_error: false };
                         }
                     }
                     _ => {}
@@ -1507,8 +1660,8 @@ fn handle_overlay(state: &mut AppState, key: crossterm::event::KeyEvent) -> bool
                 KeyCode::Enter => {
                     let msg = state.commit_msg.clone();
                     let body = if value.trim().is_empty() { None } else { Some(value.trim().to_string()) };
-                    state.action_commit(msg, body.as_deref());
-                    state.overlay = Overlay::Message { text: "Commit created (see log)".to_string(), is_error: false };
+                    state.action_commit(msg, body);
+                    state.overlay = Overlay::Message { text: "Commit started (see log)".to_string(), is_error: false };
                 }
                 KeyCode::Char(c) => { value.push(c); }
                 KeyCode::Backspace => { value.pop(); }
@@ -1548,15 +1701,16 @@ fn handle_overlay(state: &mut AppState, key: crossterm::event::KeyEvent) -> bool
         }
         Overlay::ResetCommit { value, mode } => {
             match code {
-                KeyCode::Char('s') => *mode = ResetMode::Soft,
-                KeyCode::Char('m') => *mode = ResetMode::Mixed,
-                KeyCode::Char('h') => *mode = ResetMode::Hard,
+                // Mode keys don't collide with typing a target like `main` or `HEAD~2`.
+                KeyCode::Char('1') => *mode = ResetMode::Soft,
+                KeyCode::Char('2') => *mode = ResetMode::Mixed,
+                KeyCode::Char('3') => *mode = ResetMode::Hard,
                 KeyCode::Enter => {
                     let spec = value.trim().to_string();
                     if !spec.is_empty() {
                         let m = *mode;
                         state.do_reset(m, spec);
-                        state.overlay = Overlay::Message { text: "Reset complete (see log)".to_string(), is_error: false };
+                        state.overlay = Overlay::Message { text: "Reset started (see log)".to_string(), is_error: false };
                     }
                 }
                 KeyCode::Char(c) => value.push(c),
@@ -1720,12 +1874,10 @@ fn move_down(state: &mut AppState) {
             }
         }
         Focus::Graph => {
-            if let Some(graph) = &state.graph {
-                let n = graph.nodes.len();
-                if n > 0 {
-                    let i = state.graph_state.selected().map(|i| (i + 1) % n).unwrap_or(0);
-                    state.graph_state.select(Some(i));
-                }
+            let n = state.graph_lines.len();
+            if n > 0 {
+                let i = state.graph_state.selected().map(|i| (i + 1) % n).unwrap_or(0);
+                state.graph_state.select(Some(i));
             }
         }
         Focus::Detail => {}
@@ -1753,12 +1905,10 @@ fn move_up(state: &mut AppState) {
             }
         }
         Focus::Graph => {
-            if let Some(graph) = &state.graph {
-                let n = graph.nodes.len();
-                if n > 0 {
-                    let i = state.graph_state.selected().map(|i| if i == 0 { n - 1 } else { i - 1 }).unwrap_or(0);
-                    state.graph_state.select(Some(i));
-                }
+            let n = state.graph_lines.len();
+            if n > 0 {
+                let i = state.graph_state.selected().map(|i| if i == 0 { n - 1 } else { i - 1 }).unwrap_or(0);
+                state.graph_state.select(Some(i));
             }
         }
         Focus::Detail => {}

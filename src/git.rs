@@ -1130,6 +1130,14 @@ impl GitRepo {
         Ok(status)
     }
 
+    /// The upstream remote of a branch (from `branch.<name>.remote` in git
+    /// config), if configured.
+    pub fn upstream_remote(&self, branch: &str) -> Result<Option<String>> {
+        let cfg = self.repo.config()?;
+        let key = format!("branch.{}.remote", branch);
+        Ok(cfg.get_string(&key).ok())
+    }
+
     /// Detailed tag list: `(name, short_sha, message)` sorted by date desc.
     pub fn tag_detail(&self) -> Result<Vec<(String, String, String)>> {
         let workdir = self.workdir();

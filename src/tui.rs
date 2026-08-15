@@ -476,6 +476,12 @@ struct AppState {
     tip_visible: bool,
     tip_signature: Option<(Focus, usize, DetailMode)>,
     hover_cache: Option<(Focus, usize, DetailMode, String)>,
+    // Current-position indicators (branch / HEAD / upstream remote)
+    current_branch: Option<String>,
+    head_short: String,
+    upstream_remote: Option<String>,
+    ahead: usize,
+    behind: usize,
 }
 
 impl AppState {
@@ -537,6 +543,11 @@ impl AppState {
             tip_visible: false,
             tip_signature: None,
             hover_cache: None,
+            current_branch: None,
+            head_short: String::new(),
+            upstream_remote: None,
+            ahead: 0,
+            behind: 0,
         };
         state.refresh();
         state.remote_state.select(Some(0));
@@ -590,6 +601,32 @@ impl AppState {
         } else {
             let i = prev_file.map(|i| i.min(self.files.len() - 1)).unwrap_or(0);
             self.file_state.select(Some(i));
+        }
+
+        // Current-position indicators: active branch, HEAD commit, upstream
+        // remote, and ahead/behind (stays fresh on every refresh/checkout).
+        self.current_branch = self.repo.current_branch().ok().flatten();
+        self.head_short = self
+            .repo
+            .head_commit()
+            .ok()
+            .map(|c| {
+                let s = c.id().to_string();
+                s[..8.min(s.len())].to_string()
+            })
+            .unwrap_or_default();
+        self.ahead = 0;
+        self.behind = 0;
+        self.upstream_remote = None;
+        if let Some(branch) = self.current_branch.clone() {
+            if let Ok(info) = self.repo.branch_info(&branch) {
+                self.ahead = info.ahead;
+                self.behind = info.behind;
+            }
+            self.upstream_remote = self.repo.upstream_remote(&branch).ok().flatten();
+        }
+        if self.upstream_remote.is_none() {
+            self.upstream_remote = self.repo.config.get_default_remote().cloned();
         }
     }
 
@@ -1615,7 +1652,7 @@ pub fn run_tui() -> io::Result<()> {
 fn ui(f: &mut Frame, state: &mut AppState) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(3)])
+        .constraints([Constraint::Min(0), Constraint::Length(1), Constraint::Length(3)])
         .split(f.area());
 
     let inner = Layout::default()
@@ -1632,6 +1669,8 @@ fn ui(f: &mut Frame, state: &mut AppState) {
     render_branches(f, state, inner[1]);
     render_files(f, state, inner[2]);
     render_detail(f, state, inner[3]);
+
+    render_status_bar(f, state, layout[1]);
 
     // Floating idle tooltip, drawn after all panes so it can overflow the
     // focused pane and use the full terminal width without truncation.
@@ -1657,19 +1696,58 @@ fn ui(f: &mut Frame, state: &mut AppState) {
     let footer = Paragraph::new(help)
         .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(CYAN)))
         .style(Style::default().fg(CREAM).bg(Color::Rgb(50, 50, 50)));
-    f.render_widget(footer, layout[1]);
+    f.render_widget(footer, layout[2]);
 
     render_overlay(f, state);
 }
 
+/// Build the status-bar text: `◆ branch @ short_sha  ↑ remote  (+a/-b)`.
+fn status_line(branch: &str, head_short: &str, remote: Option<&str>, ahead: usize, behind: usize) -> String {
+    let mut line = format!("◆ {}", if branch.is_empty() { "HEAD" } else { branch });
+    if !head_short.is_empty() {
+        line.push_str(&format!(" @ {}", head_short));
+    }
+    if let Some(r) = remote.filter(|r| !r.is_empty()) {
+        line.push_str(&format!("  ↑ {}", r));
+    }
+    if ahead > 0 || behind > 0 {
+        line.push_str(&format!("  (+{}/-{})", ahead, behind));
+    }
+    line
+}
+
+/// Render the 1-row status bar: active branch, HEAD commit, upstream remote,
+/// and ahead/behind.
+fn render_status_bar(f: &mut Frame, state: &AppState, area: Rect) {
+    let branch = state.current_branch.as_deref().unwrap_or("HEAD");
+    let remote = state.upstream_remote.as_deref();
+    let text = status_line(branch, &state.head_short, remote, state.ahead, state.behind);
+    let p = Paragraph::new(text)
+        .style(Style::default().fg(Color::Black).bg(GREEN));
+    f.render_widget(p, area);
+}
+
 fn render_remotes(f: &mut Frame, state: &mut AppState, area: Rect) {
     let default = state.repo.config.get_default_remote().cloned();
+    let upstream = state.upstream_remote.clone();
     let items: Vec<ListItem> = state
         .remotes
         .iter()
         .map(|r| {
-            let marker = if default.as_deref() == Some(&r.name) { " [default]" } else { "" };
-            ListItem::new(format!("{}{}", r.name, marker))
+            let is_default = default.as_deref() == Some(&r.name);
+            let is_upstream = upstream.as_deref() == Some(&r.name);
+            let marker = if is_default { " [default]" } else { "" };
+            let head = if is_upstream { "● " } else { "  " };
+            let text = format!("{}{}{}", head, r.name, marker);
+            let mut style = if is_upstream {
+                Style::default().fg(GREEN).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            if is_default {
+                style = style.fg(CYAN);
+            }
+            ListItem::new(text).style(style)
         })
         .collect();
     let title = if state.focus == Focus::Remotes { " Remotes (focused) " } else { " Remotes " };
@@ -1688,29 +1766,31 @@ fn render_branches(f: &mut Frame, state: &mut AppState, area: Rect) {
     };
     
     let branch_items: Vec<ListItem> = {
+        let make_item = |b: &str, sel: bool, is_current: bool| {
+            let mark = if sel { "[x]" } else { "[ ]" };
+            let head = if is_current { "● " } else { "  " };
+            let text = format!("{}{} {}", head, mark, b);
+            if is_current {
+                ListItem::new(text).style(Style::default().fg(GREEN).add_modifier(Modifier::BOLD))
+            } else {
+                ListItem::new(text)
+            }
+        };
         if search_query.is_empty() && state.filtered_branches.is_empty() {
-            state.branches
+            state
+                .branches
                 .iter()
-                .map(|(b, sel)| {
-                    let mark = if *sel { "[x]" } else { "[ ]" };
-                    ListItem::new(format!("{} {}", mark, b))
-                })
+                .map(|(b, sel)| make_item(b, *sel, state.current_branch.as_deref() == Some(b.as_str())))
                 .collect()
         } else if search_query.is_empty() {
             state.filtered_branches.iter()
                 .filter_map(|b| state.branches.iter().find(|(name, _)| name == b))
-                .map(|(b, sel)| {
-                    let mark = if *sel { "[x]" } else { "[ ]" };
-                    ListItem::new(format!("{} {}", mark, b))
-                })
+                .map(|(b, sel)| make_item(b, *sel, state.current_branch.as_deref() == Some(b.as_str())))
                 .collect()
         } else {
             state.branches.iter()
                 .filter(|(b, _)| b.contains(search_query))
-                .map(|(b, sel)| {
-                    let mark = if *sel { "[x]" } else { "[ ]" };
-                    ListItem::new(format!("{} {}", mark, b))
-                })
+                .map(|(b, sel)| make_item(b, *sel, state.current_branch.as_deref() == Some(b.as_str())))
                 .collect()
         }
     };
@@ -1830,13 +1910,19 @@ fn render_detail(f: &mut Frame, state: &mut AppState, area: Rect) {
     f.render_widget(p, area);
     if state.detail_mode == DetailMode::Graph {
         // Re-render graph as a list for selection highlight.
+        let head = state.head_short.as_str();
         let items: Vec<ListItem> = state
             .graph_lines
             .iter()
             .map(|gl| {
                 if gl.is_commit {
-                    ListItem::new(format!("{}  [Enter: pick, D: diff]", gl.text))
-                        .style(Style::default().fg(CREAM))
+                    let is_head = head.len() >= 8 && gl.sha.starts_with(head);
+                    let style = if is_head {
+                        Style::default().fg(GREEN).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(CREAM)
+                    };
+                    ListItem::new(format!("{}  [Enter: pick, D: diff]", gl.text)).style(style)
                 } else {
                     ListItem::new(gl.text.clone()).style(Style::default().fg(GRAY))
                 }
@@ -3708,5 +3794,22 @@ mod tests {
         assert_eq!(wrap_height("hello", 10), 1);
         assert_eq!(wrap_height("hello world", 5), 3); // 11 chars / 5 cols
         assert_eq!(wrap_height("", 5), 1);
+    }
+
+    #[test]
+    fn status_line_formats() {
+        assert_eq!(status_line("main", "a1b2c3d4", Some("origin"), 0, 0), "◆ main @ a1b2c3d4  ↑ origin");
+        assert_eq!(status_line("main", "a1b2c3d4", Some("origin"), 3, 1), "◆ main @ a1b2c3d4  ↑ origin  (+3/-1)");
+        assert_eq!(status_line("", "", None, 0, 0), "◆ HEAD");
+        assert_eq!(status_line("feature", "abcd1234", None, 5, 0), "◆ feature @ abcd1234  (+5/-0)");
+    }
+
+    #[test]
+    fn branch_head_marker_flag() {
+        // A helper mirroring the closure logic used in render_branches.
+        let flag = |b: &str, current: Option<&str>| current == Some(b);
+        assert!(flag("main", Some("main")));
+        assert!(!flag("dev", Some("main")));
+        assert!(!flag("main", None));
     }
 }

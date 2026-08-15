@@ -34,6 +34,18 @@ pub struct Config {
     pub sync_preferences: SyncPreferences,
     #[serde(default)]
     pub gui: GuiPreferences,
+    #[serde(default)]
+    pub identity: IdentityPreferences,
+}
+
+/// Optional display-name overrides for the identity shown in the welcome
+/// screen and the playground top bar.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IdentityPreferences {
+    /// Override the detected device (host) name.
+    pub device: Option<String>,
+    /// Override the detected system username.
+    pub username: Option<String>,
 }
 
 /// GUI behaviour preferences (idle tips, previews, GitHub integration).
@@ -323,4 +335,20 @@ pub fn init_config(repo: &Repository) -> Result<Config> {
     config.reconcile_with_git(repo)?;
     config.save(repo)?;
     Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_prefs_default_and_override() {
+        let d = IdentityPreferences::default();
+        assert!(d.device.is_none());
+        assert!(d.username.is_none());
+
+        let parsed: Config = toml::from_str("[identity]\ndevice = \"MyPC\"\nusername = \"alice\"\n").unwrap();
+        assert_eq!(parsed.identity.device.as_deref(), Some("MyPC"));
+        assert_eq!(parsed.identity.username.as_deref(), Some("alice"));
+    }
 }

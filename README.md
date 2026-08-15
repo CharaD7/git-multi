@@ -370,7 +370,15 @@ Not in scope: delta updates, background TUI update checks, or automated rollback
 
 ## Configuration
 
-`git-multi` stores its configuration in `.gitmulti/config.toml` within your repository. This file tracks default remotes, sync preferences, and metadata for each remote.
+`git-multi` stores its configuration in `.gitmulti/config.toml` within your repository. This file tracks default remotes, sync preferences, GUI preferences, and metadata for each remote.
+
+The welcome screen and the playground's top bar show your **device name** (from `HOSTNAME`/`COMPUTERNAME` or `hostname`) and **system username** (from `USER`/`USERNAME` or `whoami`), plus your GitHub username when signed in to `gh`. You can override the detected identity:
+
+```toml
+[identity]
+device = "MyPC"      # override the auto-detected host name
+username = "alice"   # override the auto-detected system user
+```
 
 ## License
 

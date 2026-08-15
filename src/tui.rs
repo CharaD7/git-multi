@@ -8,6 +8,7 @@ use ratatui::{
 };
 use std::collections::HashMap;
 use std::io;
+use std::path::Path;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -26,9 +27,26 @@ const YELLOW: Color = Color::Rgb(255, 209, 102);
 const BLUE: Color = Color::Rgb(120, 180, 255);
 const ORANGE: Color = Color::Rgb(255, 159, 64);
 
-/// Best-effort machine hostname from environment variables.
-fn hostname() -> String {
-    for key in ["HOSTNAME", "HOST", "COMPUTERNAME"] {
+/// Detect the device (host) name and system username cross-platform.
+///
+/// Order: environment variables first, then the platform command
+/// (`hostname` / `whoami`) via the captured-output helper with a short timeout,
+/// so neither can hang the UI. On Windows `whoami` emits `DOMAIN\user`, which
+/// is trimmed to the part after the backslash.
+fn system_identity() -> (String, String) {
+    let device = env_or_cmd(&["HOSTNAME", "HOST", "COMPUTERNAME"], "hostname");
+    let username = env_or_cmd(&["USER", "LOGNAME", "USERNAME"], "whoami")
+        .rsplit('\\')
+        .next()
+        .unwrap_or("unknown")
+        .to_string();
+    (device, username)
+}
+
+/// Return the first non-empty env var, otherwise the trimmed output of `cmd`
+/// (captured, 5s timeout), otherwise "unknown".
+fn env_or_cmd(env_keys: &[&str], cmd: &str) -> String {
+    for key in env_keys {
         if let Ok(v) = std::env::var(key) {
             let v = v.trim().to_string();
             if !v.is_empty() {
@@ -36,7 +54,36 @@ fn hostname() -> String {
             }
         }
     }
+    if let Ok(out) = crate::git::run_captured(cmd, &[], Path::new("."), &[], Duration::from_secs(5)) {
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !s.is_empty() {
+                return s;
+            }
+        }
+    }
     "unknown".to_string()
+}
+
+/// Apply `[identity]` config overrides over the auto-detected device/username.
+fn apply_identity_overrides(
+    device: String,
+    username: String,
+    prefs: &crate::config::IdentityPreferences,
+) -> (String, String) {
+    let device = prefs
+        .device
+        .as_ref()
+        .filter(|d| !d.trim().is_empty())
+        .map(|d| d.trim().to_string())
+        .unwrap_or(device);
+    let username = prefs
+        .username
+        .as_ref()
+        .filter(|u| !u.trim().is_empty())
+        .map(|u| u.trim().to_string())
+        .unwrap_or(username);
+    (device, username)
 }
 
 #[derive(Default, Clone)]
@@ -534,6 +581,7 @@ struct AppState {
     transition: Option<Transition>,
     transition_from_welcome: bool,
     host: String,
+    username: String,
     gh_user: Option<String>,
 }
 
@@ -549,7 +597,10 @@ impl AppState {
         std::thread::spawn(move || tui_worker(job_rx, result_tx));
 
         let gui = repo.config.gui.clone();
-        let host = hostname();
+        let (host, username) = {
+            let (device, user) = system_identity();
+            apply_identity_overrides(device, user, &repo.config.identity)
+        };
         let gh_user = crate::github::current_user(&repo);
         let show_welcome = gui.show_welcome;
         let mut state = Self {
@@ -614,6 +665,7 @@ impl AppState {
             transition: None,
             transition_from_welcome: false,
             host,
+            username,
             gh_user,
         };
         state.refresh();
@@ -1895,9 +1947,10 @@ fn render_playground(f: &mut Frame, state: &mut AppState, area: Rect) {
 /// both bold and colored.
 fn render_top_bar(f: &mut Frame, state: &AppState, area: Rect) {
     let host = if state.host.is_empty() { "unknown".to_string() } else { state.host.clone() };
-    let user = state.gh_user.as_deref().unwrap_or("not signed in");
-    let left = format!("▸ {}", host);
-    let right = user.to_string();
+    let who = if state.username.is_empty() { "unknown".to_string() } else { state.username.clone() };
+    let gh = state.gh_user.as_deref().unwrap_or("not signed in");
+    let left = format!("▸ {}@{}", who, host);
+    let right = gh.to_string();
     let pad = area.width.saturating_sub(2).saturating_sub(left.chars().count() as u16 + right.chars().count() as u16 + 1);
     let line = Line::from(vec![
         Span::styled(left, Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
@@ -1946,15 +1999,20 @@ fn render_welcome(f: &mut Frame, state: &AppState, area: Rect) {
     let title_fg = if pulse > 0.0 { VIBRANT_PINK } else { CYAN };
 
     let inner_w = (area.width.saturating_sub(4)) as usize;
-    let user = state.gh_user.as_deref().unwrap_or("not signed in");
-    let identity = format!("{}  ·  {}", state.host, user);
+    let host = if state.host.is_empty() { "unknown".to_string() } else { state.host.clone() };
+    let who = if state.username.is_empty() { "unknown".to_string() } else { state.username.clone() };
+    let gh = state.gh_user.as_deref().unwrap_or("not signed in");
+    let identity = format!("{}  ·  {}", host, who);
+    let github_line = format!("github: {}", gh);
 
     // Assemble centered content.
     let wrapped = wrap_text(&blurb, inner_w);
-    let mut rows: Vec<String> = Vec::new();
-    rows.push(center_pad("git-multi", inner_w));
-    rows.push(center_pad(&identity, inner_w));
-    rows.push(String::new());
+    let mut rows: Vec<String> = vec![
+        center_pad("git-multi", inner_w),
+        center_pad(&identity, inner_w),
+        center_pad(&github_line, inner_w),
+        String::new(),
+    ];
     for l in &wrapped {
         rows.push(center_pad(l, inner_w));
     }
@@ -4395,5 +4453,29 @@ mod tests {
         assert!(flag("main", Some("main")));
         assert!(!flag("dev", Some("main")));
         assert!(!flag("main", None));
+    }
+
+    #[test]
+    fn identity_overrides_replace_detection() {
+        let none = crate::config::IdentityPreferences::default();
+        assert_eq!(apply_identity_overrides("box".into(), "bob".into(), &none), ("box".into(), "bob".into()));
+
+        let mut prefs = crate::config::IdentityPreferences {
+            device: Some("  MyPC  ".to_string()),
+            username: Some("alice".to_string()),
+        };
+        assert_eq!(apply_identity_overrides("box".into(), "bob".into(), &prefs), ("MyPC".into(), "alice".into()));
+
+        // Empty override strings fall back to detection.
+        prefs.device = Some("   ".to_string());
+        assert_eq!(apply_identity_overrides("box".into(), "bob".into(), &prefs), ("box".into(), "alice".into()));
+    }
+
+    #[test]
+    fn whoami_windows_domain_trimmed() {
+        // Windows whoami returns DOMAIN\user; we keep the part after the backslash.
+        let raw = "CORP\\jdoe";
+        let user = raw.rsplit('\\').next().unwrap_or("unknown");
+        assert_eq!(user, "jdoe");
     }
 }

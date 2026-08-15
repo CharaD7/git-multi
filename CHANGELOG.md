@@ -75,6 +75,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "Don't show again"). The playground then dissolves in with a warp/bounce
   transition, and the identity is shown in a new top bar (hostname left,
   GitHub username right). Configure via `[gui] show_welcome`.
+- Cross-platform identity: the welcome screen and playground top bar now show
+  the device name (`HOSTNAME`/`COMPUTERNAME`/`hostname`) and the system
+  username (`USER`/`USERNAME`/`whoami`, with Windows `DOMAIN\user` trimmed),
+  plus the GitHub username. Overridable via `[identity] device` /
+  `[identity] username` in the config.
 
 ### Fixed
 - Auto-save no longer stages everything into the real index (`git add -A` was

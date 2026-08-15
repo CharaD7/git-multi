@@ -61,6 +61,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Action-gap coverage: `Enter` checks out the selected branch, Files pane
   `X`/`V` run `git rm`/`git mv`, Branches `K` rebases onto a ref, Detail `X`
   runs `git show`, PR detail `C` checks out the PR locally.
+- Pick/cherry-pick across origins: `git-multi pick <sha|A..B> [--from-remote
+  <r>] [--to-branch <b>] [--copy] [--push <r>]` auto-fetches the source,
+  applies onto a chosen target branch, can stage without committing
+  (`--copy`), and can push the result. In the TUI, `v` in the Remotes pane
+  opens a remote-branch picker: browse a `remote/branch`, multi-select commits
+  (Space), toggle copy/target/push (`c`/`t`/`p`), preview diffs (`d`), and
+  apply (`Enter`). The cherry-pick overlay (Files `P`, graph `Enter`) now also
+  supports `t`/`c`/`p`.
 
 ### Fixed
 - Auto-save no longer stages everything into the real index (`git add -A` was

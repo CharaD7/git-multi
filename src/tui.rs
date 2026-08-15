@@ -68,6 +68,9 @@ enum Overlay {
     // ---- Generic input / confirm ----
     Prompt { title: String, value: String, action: PromptAction },
     ConfirmDangerous { title: String, prompt: String, action: DangerousAction },
+    // ---- Cross-origin pick ----
+    PickSource { filter: String, selected: usize },
+    PickBrowse { selected: usize },
 }
 
 /// Which tab of the PR detail modal is shown.
@@ -97,6 +100,7 @@ enum PromptAction {
     GitMv { from: String },
     AddTag,
     StashSave,
+    PickTarget,
 }
 
 /// A destructive action awaiting y/n confirmation.
@@ -301,6 +305,7 @@ fn bindings() -> Vec<Binding> {
         Binding::action(Scope::Focus(Remotes), Key::Char('f'), "Fetch", "Fetch from the selected remote", |s| s.action_fetch()),
         Binding::action(Scope::Focus(Remotes), Key::Char('p'), "Push", "Push to the selected remote", |s| s.action_push()),
         Binding::action(Scope::Focus(Remotes), Key::Char('l'), "Pull", "Pull from the selected remote", |s| s.action_pull()),
+        Binding::action(Scope::Focus(Remotes), Key::Char('v'), "Pick from remote", "Browse a remote branch and cherry-pick its commits", |s| s.open_pick_source()),
         // ---- Branches pane ----
         Binding::action(Scope::Focus(Branches), Key::Enter, "Checkout", "Check out the selected branch", |s| s.do_checkout()),
         Binding::action(Scope::Focus(Branches), Key::Char('c'), "Create branch", "Create a branch", |s| s.overlay = Overlay::CreateBranch { step: 0, name: String::new(), base: String::new(), remote: String::new() }),
@@ -338,12 +343,25 @@ fn bindings() -> Vec<Binding> {
         Binding::doc(Scope::OverlayDoc, Key::Char('3'), "Reset hard", "Reset mode: hard (in Reset overlay)"),
         Binding::doc(Scope::OverlayDoc, Key::Esc, "Close", "Close the current overlay"),
         Binding::doc(Scope::OverlayDoc, Key::Char(' '), "Cherry-pick", "Execute a cherry-pick (in the pick overlay)"),
+        Binding::doc(Scope::OverlayDoc, Key::Char('c'), "Copy / no-commit", "Toggle apply-without-commit in the pick overlays"),
+        Binding::doc(Scope::OverlayDoc, Key::Char('t'), "Target branch", "Set the pick target branch"),
+        Binding::doc(Scope::OverlayDoc, Key::Char('p'), "Push result", "Toggle pushing after the pick"),
+        Binding::doc(Scope::OverlayDoc, Key::Char('a'), "Select all", "Toggle all commits in the pick browser"),
+        Binding::doc(Scope::OverlayDoc, Key::Char('d'), "Preview diff", "Preview the selected commit's diff"),
     ]
 }
 
 struct RemoteEntry {
     name: String,
     url: String,
+}
+
+/// State for the cross-origin commit browser (`Overlay::PickBrowse`).
+struct PickBrowseState {
+    remote: String,
+    branch: String,
+    items: Vec<CommitSummary>,
+    marks: Vec<bool>,
 }
 
 /// A blocking git operation handed off to the background worker thread so the
@@ -359,7 +377,6 @@ enum UiJob {
     Amend { msg: String },
     Revert { spec: String },
     Reset { mode: ResetMode, spec: String },
-    CherryPick { spec: String },
     AddRemote { name: String, url: String },
     RenameRemote { old: String, new: String },
     RemoveRemote { name: String },
@@ -396,6 +413,9 @@ enum UiJob {
     PrShow { number: u32, show_diff: bool },
     OpenUrl { url: String },
     DeleteTag { name: String },
+    // ---- Cross-origin pick ----
+    LoadRemoteCommits { remote: String, branch: String },
+    PickCommits { specs: Vec<String>, target_branch: String, copy: bool, push_remote: Option<String> },
 }
 
 /// Structured data returned from a background job, applied on the UI thread.
@@ -407,6 +427,7 @@ enum JobPayload {
     Prs(Vec<PrSummary>),
     PrDetail(Box<PrDetails>),
     PrFiles(Vec<PrFile>),
+    RemoteCommits { remote: String, branch: String, commits: Vec<CommitSummary> },
 }
 
 /// Outcome of a background job, applied on the UI thread.
@@ -482,6 +503,11 @@ struct AppState {
     upstream_remote: Option<String>,
     ahead: usize,
     behind: usize,
+    // Cross-origin pick state
+    pick_browse: Option<PickBrowseState>,
+    pick_target: String,
+    pick_copy: bool,
+    pick_push: bool,
 }
 
 impl AppState {
@@ -548,6 +574,10 @@ impl AppState {
             upstream_remote: None,
             ahead: 0,
             behind: 0,
+            pick_browse: None,
+            pick_target: String::new(),
+            pick_copy: false,
+            pick_push: false,
         };
         state.refresh();
         state.remote_state.select(Some(0));
@@ -627,6 +657,9 @@ impl AppState {
         }
         if self.upstream_remote.is_none() {
             self.upstream_remote = self.repo.config.get_default_remote().cloned();
+        }
+        if self.pick_target.is_empty() {
+            self.pick_target = self.current_branch.clone().unwrap_or_default();
         }
     }
 
@@ -718,6 +751,11 @@ impl AppState {
                 JobPayload::PrFiles(files) => {
                     self.pr_files = files;
                 }
+                JobPayload::RemoteCommits { remote, branch, commits } => {
+                    let marks = vec![false; commits.len()];
+                    self.pick_browse = Some(PickBrowseState { remote, branch, items: commits, marks });
+                    self.overlay = Overlay::PickBrowse { selected: 0 };
+                }
             }
             if result.refresh {
                 self.refresh();
@@ -805,11 +843,6 @@ impl AppState {
     fn do_reset(&mut self, mode: ResetMode, spec: String) {
         self.log(format!("Resetting ({:?}) to {} ...", mode, spec));
         self.submit_job(UiJob::Reset { mode, spec }, false);
-    }
-
-    fn do_cherry_pick(&mut self, spec: String) {
-        self.log(format!("Cherry-picking {} ...", spec));
-        self.submit_job(UiJob::CherryPick { spec }, false);
     }
 
     fn load_blame(&mut self, path: &str) {
@@ -1200,6 +1233,23 @@ impl AppState {
         self.submit_job(UiJob::LoadPrFiles { number }, true);
     }
 
+    // ---- Cross-origin pick ----
+
+    /// Open the remote-branch source picker (Remotes pane `v`).
+    fn open_pick_source(&mut self) {
+        self.overlay = Overlay::PickSource { filter: String::new(), selected: 0 };
+    }
+
+    /// Prompt to set the pick target branch (shared by the cherry-pick overlay
+    /// and the commit browser).
+    fn open_pick_target_prompt(&mut self) {
+        self.overlay = Overlay::Prompt {
+            title: "Pick target branch (empty = current)".to_string(),
+            value: self.pick_target.clone(),
+            action: PromptAction::PickTarget,
+        };
+    }
+
     /// Signature of the current selection, used to re-arm idle tips/hovers.
     fn selection_signature(&self) -> Option<(Focus, usize, DetailMode)> {
         let idx = match self.focus {
@@ -1216,7 +1266,7 @@ impl AppState {
     fn focus_tip(&self) -> Option<String> {
         let focus = self.focus;
         let (title, keys): (&str, Vec<&str>) = match focus {
-            Focus::Remotes => ("Remotes", vec!["f fetch", "p push", "l pull", "M merge/sync", "a add", "R rename", "x remove", "D default", "Enter fetch"]),
+            Focus::Remotes => ("Remotes", vec!["f fetch", "p push", "l pull", "M merge/sync", "a add", "R rename", "x remove", "D default", "v pick from remote", "Enter fetch"]),
             Focus::Branches => ("Branches", vec!["Enter checkout", "c create", "m rename", "x delete", "Space toggle", "f/p/l net"]),
             Focus::Files => ("Files", vec!["Enter diff", "S stage/unstage", "b blame", "P cherry-pick", "H history", "v commits"]),
             Focus::Detail => ("Detail", vec!["j/k scroll", "d diff", "F files", "s status", "v commits"]),
@@ -1337,10 +1387,6 @@ fn handle_job(repo: &mut crate::git::GitRepo, job: UiJob) -> JobResult {
         UiJob::Reset { mode, spec } => match repo.reset(mode, &spec) {
             Ok(()) => result(format!("Reset ({:?}) to {}", mode, spec), true),
             Err(e) => result_err(format!("Reset failed: {}", e)),
-        },
-        UiJob::CherryPick { spec } => match repo.cherry_pick_commit(&spec) {
-            Ok(()) => result(format!("Cherry-picked {}", spec), true),
-            Err(e) => result_err(format!("Cherry-pick failed: {}", e)),
         },
         UiJob::AddRemote { name, url } => match repo.add_remote(&name, &url) {
             Ok(()) => result(format!("Added remote '{}'", name), true),
@@ -1551,6 +1597,43 @@ fn handle_job(repo: &mut crate::git::GitRepo, job: UiJob) -> JobResult {
             Ok(()) => result(format!("Deleted tag '{}'", name), true),
             Err(e) => result_err(format!("Tag delete failed: {}", e)),
         },
+        // ---- Cross-origin pick ----
+        UiJob::LoadRemoteCommits { remote, branch } => {
+            let r = repo
+                .fetch_remote(&remote)
+                .and_then(|_| repo.list_remote_commits(&remote, &branch, 200));
+            match r {
+                Ok(commits) => JobResult {
+                    message: String::new(),
+                    refresh: false,
+                    payload: JobPayload::RemoteCommits { remote, branch, commits },
+                },
+                Err(e) => result_err(format!("Could not load {}/{}: {}", remote, branch, e)),
+            }
+        }
+        UiJob::PickCommits { specs, target_branch, copy, push_remote } => {
+            let target = if target_branch.is_empty() { None } else { Some(target_branch.as_str()) };
+            let r = repo.pick_commits(&specs, copy, target);
+            match r {
+                Ok(applied) => {
+                    let verb = if copy { "Copied" } else { "Cherry-picked" };
+                    let mut msg = format!("{} {} commit(s)", verb, applied.len());
+                    if let Some(pr) = &push_remote {
+                        let branch = if target_branch.is_empty() {
+                            repo.current_branch().ok().flatten().unwrap_or_default()
+                        } else {
+                            target_branch.clone()
+                        };
+                        match repo.push_branches(pr, std::slice::from_ref(&branch), false) {
+                            Ok(()) => msg.push_str(&format!(" and pushed to '{}'", pr)),
+                            Err(e) => return result_err(format!("{}; push to '{}' failed: {}", msg, pr, e)),
+                        }
+                    }
+                    result(msg, true)
+                }
+                Err(e) => result_err(format!("Cherry-pick failed: {}", e)),
+            }
+        }
     }
 }
 
@@ -1987,8 +2070,11 @@ fn render_overlay(f: &mut Frame, state: &AppState) {
             } else {
                 format!("\n{}", context)
             };
-            modal(f, 85, 6, " Cherry-pick commit ",
-                &format!("Commit to cherry-pick (sha/ref):\n> {}\u{2588}{}\n\n[space] cherry-pick  [d] preview diff  [Enter] accept  [Esc] cancel", value, ctx_line), VIBRANT_PINK)
+            let target = if state.pick_target.is_empty() { "(current)" } else { &state.pick_target };
+            let copy = if state.pick_copy { "ON" } else { "off" };
+            let push = if state.pick_push { "ON" } else { "off" };
+            modal(f, 85, 7, " Cherry-pick commit ",
+                &format!("Commit to cherry-pick (sha/ref):\n> {}\u{2588}{}\ntarget: {}   copy (no-commit): {}   push: {}\n\n[space] cherry-pick  [d] preview diff  [t] target  [c] copy  [p] push  [Enter] accept  [Esc] cancel", value, ctx_line, target, copy, push), VIBRANT_PINK)
         }
 Overlay::Message { text, is_error } => {
              let color = if *is_error { RED } else { GREEN };
@@ -2030,6 +2116,8 @@ Overlay::Message { text, is_error } => {
          Overlay::Profile { login, loaded } => render_profile(f, state, login, *loaded),
          Overlay::Prs { selected, state: pr_state, filter } => render_prs(f, state, *selected, pr_state, filter),
          Overlay::PrDetail { number, tab } => render_pr_detail(f, state, *number, *tab),
+         Overlay::PickSource { filter, selected } => render_pick_source(f, state, filter, *selected),
+         Overlay::PickBrowse { selected } => render_pick_browse(f, state, *selected),
          Overlay::Prompt { title, value, .. } => modal(f, 80, 5, title,
              &format!("{}\n> {}\u{2588}", prompt_hint(title), value), CYAN),
          Overlay::ConfirmDangerous { title, prompt, .. } => modal(f, 70, 5, title,
@@ -2470,6 +2558,86 @@ fn render_pr_detail(f: &mut Frame, state: &AppState, number: u32, tab: PrTab) {
         }
     }
     glass_modal(f, 88, 34, &format!(" Pull Request #{} ", number), text, VIBRANT_PINK);
+}
+
+/// Flatten `remote/branch` sources for the picker, sorted by remote name.
+fn pick_sources(repo: &crate::git::GitRepo) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(info) = repo.list_all_branches() {
+        let mut keys: Vec<&String> = info.remote.keys().collect();
+        keys.sort();
+        for r in keys {
+            if let Some(brs) = info.remote.get(r) {
+                for b in brs {
+                    out.push(format!("{}/{}", r, b.name));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Render the cross-origin source picker (choose a `remote/branch`).
+fn render_pick_source(f: &mut Frame, state: &AppState, filter: &str, selected: usize) {
+    let area = centered_rect(62, 18, f.area());
+    let sources = pick_sources(&state.repo);
+    let filtered: Vec<&String> = if filter.trim().is_empty() {
+        sources.iter().collect()
+    } else {
+        sources.iter().filter(|s| s.contains(filter)).collect()
+    };
+    let mut text = format!("Pick source — a remote branch to browse\n> {}\u{2588}\n\n", filter);
+    if filtered.is_empty() {
+        text.push_str("(no remote branches — run a fetch first)\n");
+    }
+    let sel = selected.min(filtered.len().saturating_sub(1));
+    for (i, s) in filtered.iter().enumerate() {
+        let marker = if i == sel { ">> " } else { "   " };
+        text.push_str(&format!("{} {}\n", marker, s));
+    }
+    text.push_str("\n[Enter] browse commits   [Esc] close");
+    let p = Paragraph::new(text)
+        .block(Block::default().title(" Pick from Remote ").borders(Borders::ALL).border_style(Style::default().fg(VIBRANT_PINK)))
+        .style(Style::default().fg(CREAM));
+    f.render_widget(ratatui::widgets::Clear, area);
+    f.render_widget(p, area);
+}
+
+/// Render the commit browser for picking/copying across origins.
+fn render_pick_browse(f: &mut Frame, state: &AppState, selected: usize) {
+    let area = centered_rect(88, 26, f.area());
+    let mut text = String::new();
+    if let Some(pb) = &state.pick_browse {
+        let target = if state.pick_target.is_empty() { "(current)" } else { &state.pick_target };
+        let copy = if state.pick_copy { "ON" } else { "off" };
+        let push = if state.pick_push { "ON" } else { "off" };
+        text.push_str(&format!(
+            "Pick from {}/{}    target: {}    copy (no-commit): {}    push: {}\n\n",
+            pb.remote, pb.branch, target, copy, push
+        ));
+        let sel = selected.min(pb.items.len().saturating_sub(1));
+        for (i, c) in pb.items.iter().enumerate() {
+            let mark = if pb.marks.get(i).copied().unwrap_or(false) { "[x]" } else { "[ ]" };
+            let marker = if i == sel { ">> " } else { "   " };
+            text.push_str(&format!(
+                "{} {} {}  {}  {}  {}\n",
+                marker,
+                mark,
+                c.short_id,
+                c.author,
+                crate::git::format_timestamp(c.author_date),
+                c.message
+            ));
+        }
+        text.push_str("\n[Space] select  [a] all  [c] copy  [t] target  [p] push  [d] diff  [Enter] apply  [Esc] close");
+    } else {
+        text.push_str("Loading commits…");
+    }
+    let p = Paragraph::new(text)
+        .block(Block::default().title(" Pick Commits ").borders(Borders::ALL).border_style(Style::default().fg(VIBRANT_PINK)))
+        .style(Style::default().fg(CREAM));
+    f.render_widget(ratatui::widgets::Clear, area);
+    f.render_widget(p, area);
 }
 
 /// The y coordinate of the focused list's selected row inside a pane, accounting
@@ -3169,8 +3337,15 @@ fn handle_overlay(state: &mut AppState, key: crossterm::event::KeyEvent) -> bool
                 KeyCode::Char(' ') => {
                     let spec = value.trim().to_string();
                     if !spec.is_empty() {
-                        state.do_cherry_pick(spec);
-                        state.overlay = Overlay::Message { text: "Cherry-picked (see log)".to_string(), is_error: false };
+                        let target = state.pick_target.clone();
+                        let copy = state.pick_copy;
+                        let push_remote = if state.pick_push {
+                            state.repo.config.get_default_remote().cloned()
+                        } else {
+                            None
+                        };
+                        state.submit_job(UiJob::PickCommits { specs: vec![spec], target_branch: target, copy, push_remote }, false);
+                        state.overlay = Overlay::Message { text: "Cherry-pick started (see log)".to_string(), is_error: false };
                     } else {
                         state.overlay = Overlay::Message { text: "Enter a commit SHA/ref first".to_string(), is_error: true };
                     }
@@ -3188,6 +3363,16 @@ fn handle_overlay(state: &mut AppState, key: crossterm::event::KeyEvent) -> bool
                     } else {
                         state.overlay = Overlay::Message { text: "Enter a commit SHA/ref first".to_string(), is_error: true };
                     }
+                }
+                KeyCode::Char('t') => {
+                    state.open_pick_target_prompt();
+                    return true;
+                }
+                KeyCode::Char('c') => {
+                    state.pick_copy = !state.pick_copy;
+                }
+                KeyCode::Char('p') => {
+                    state.pick_push = !state.pick_push;
                 }
                 KeyCode::Char(c) => { value.push(c); }
                 KeyCode::Backspace => { value.pop(); }
@@ -3456,6 +3641,104 @@ Overlay::Message { .. } => {
                  _ => {}
              }
          }
+         // ---- Cross-origin pick ----
+         Overlay::PickSource { filter, selected } => {
+             match code {
+                 KeyCode::Esc | KeyCode::Char('q') => state.overlay = Overlay::None,
+                 KeyCode::Up | KeyCode::Char('k') => {
+                     let n = pick_sources(&state.repo).len();
+                     if n > 0 { *selected = (*selected).saturating_sub(1) % n; }
+                 }
+                 KeyCode::Down | KeyCode::Char('j') => {
+                     let n = pick_sources(&state.repo).len();
+                     if n > 0 { *selected = (*selected + 1) % n; }
+                 }
+                 KeyCode::Enter => {
+                     let q = filter.clone();
+                     let sources = pick_sources(&state.repo);
+                     let filtered: Vec<&String> = if q.trim().is_empty() {
+                         sources.iter().collect()
+                     } else {
+                         sources.iter().filter(|s| s.contains(&q)).collect()
+                     };
+                     if let Some(src) = filtered.get(*selected) {
+                         let (remote, branch) = match src.split_once('/') {
+                             Some((r, b)) => (r.to_string(), b.to_string()),
+                             None => return true,
+                         };
+                         state.overlay = Overlay::Message { text: format!("Loading {}/{}…", remote, branch), is_error: false };
+                         state.submit_job(UiJob::LoadRemoteCommits { remote, branch }, true);
+                     }
+                 }
+                 KeyCode::Char(c) => { filter.push(c); }
+                 KeyCode::Backspace => { filter.pop(); }
+                 _ => {}
+             }
+         }
+         Overlay::PickBrowse { selected } => {
+             match code {
+                 KeyCode::Up | KeyCode::Char('k') => { *selected = selected.saturating_sub(1); }
+                 KeyCode::Down | KeyCode::Char('j') => { *selected = selected.saturating_add(1); }
+                 KeyCode::Char(' ') => {
+                     if let Some(pb) = &mut state.pick_browse {
+                         if let Some(m) = pb.marks.get_mut(*selected) {
+                             *m = !*m;
+                         }
+                     }
+                 }
+                 KeyCode::Char('a') => {
+                     if let Some(pb) = &mut state.pick_browse {
+                         let all = pb.marks.iter().all(|m| *m);
+                         for m in pb.marks.iter_mut() {
+                             *m = !all;
+                         }
+                     }
+                 }
+                 KeyCode::Char('c') => { state.pick_copy = !state.pick_copy; }
+                 KeyCode::Char('t') => {
+                     state.open_pick_target_prompt();
+                     return true;
+                 }
+                 KeyCode::Char('p') => { state.pick_push = !state.pick_push; }
+                 KeyCode::Char('d') => {
+                     if let Some(pb) = &state.pick_browse {
+                         if let Some(c) = pb.items.get(*selected) {
+                             state.commit_diff_spec = Some(c.id.clone());
+                             state.detail_mode = DetailMode::CommitDiff;
+                         }
+                     }
+                 }
+                 KeyCode::Enter => {
+                     let specs: Vec<String> = if let Some(pb) = &state.pick_browse {
+                         // Items are newest-first; apply oldest-first.
+                         pb.items
+                             .iter()
+                             .enumerate()
+                             .filter(|(i, _)| pb.marks.get(*i).copied().unwrap_or(false))
+                             .map(|(_, c)| c.id.clone())
+                             .rev()
+                             .collect()
+                     } else {
+                         Vec::new()
+                     };
+                     if specs.is_empty() {
+                         state.overlay = Overlay::Message { text: "Select at least one commit (Space)".to_string(), is_error: true };
+                     } else {
+                         let target = state.pick_target.clone();
+                         let copy = state.pick_copy;
+                         let push_remote = if state.pick_push {
+                             state.repo.config.get_default_remote().cloned()
+                         } else {
+                             None
+                         };
+                         state.submit_job(UiJob::PickCommits { specs, target_branch: target, copy, push_remote }, false);
+                         state.overlay = Overlay::Message { text: "Pick started (see log)".to_string(), is_error: false };
+                     }
+                 }
+                 KeyCode::Esc | KeyCode::Char('q') => state.overlay = Overlay::None,
+                 _ => {}
+             }
+         }
          Overlay::PrDetail { number, tab } => {
              match code {
                  KeyCode::Tab | KeyCode::Char('n') => {
@@ -3592,6 +3875,17 @@ Overlay::Message { .. } => {
                          PromptAction::StashSave => {
                              let msg = if input.trim().is_empty() { None } else { Some(input.trim().to_string()) };
                              state.submit_job(UiJob::StashSave { message: msg }, false);
+                         }
+                         PromptAction::PickTarget => {
+                             state.pick_target = input.trim().to_string();
+                             // Return to the commit browser if that's where the
+                             // prompt was opened from.
+                             if state.pick_browse.is_some() {
+                                 state.overlay = Overlay::PickBrowse { selected: 0 };
+                             } else {
+                                 state.overlay = Overlay::None;
+                             }
+                             return true;
                          }
                      }
                      state.overlay = Overlay::None;

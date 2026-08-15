@@ -309,11 +309,27 @@ pub enum Commands {
         target: String,
     },
 
-    /// Cherry-pick a single commit onto the current HEAD
+    /// Cherry-pick a commit (or A..B range) onto the current branch
     Pick {
-        /// Commit to cherry-pick (sha or ref)
+        /// Commit to cherry-pick (sha, ref, or A..B range)
         #[arg(value_name = "COMMIT")]
         commit: String,
+
+        /// Fetch from this remote first (resolves its remote-tracking refs)
+        #[arg(long, value_name = "REMOTE")]
+        from_remote: Option<String>,
+
+        /// Target branch to apply onto (defaults to the current branch)
+        #[arg(long, value_name = "BRANCH")]
+        to_branch: Option<String>,
+
+        /// Apply changes without committing (git cherry-pick -n)
+        #[arg(long)]
+        copy: bool,
+
+        /// Push the target branch to this remote after picking
+        #[arg(long, value_name = "REMOTE")]
+        push: Option<String>,
     },
 
     /// Stage a file (or all changes with ".")

@@ -281,6 +281,17 @@ git-multi graph --all --limit 200
 All of the above (plus granular stage/unstage, amend, revert, reset, and cherry-pick) are
 also available directly inside the GUI — see [GUI Mode](#gui-mode).
 
+# Cherry-pick / pick across origins
+git-multi pick upstream/abc1234 --from-remote upstream          # auto-fetch + pick onto current branch
+git-multi pick abc1234..def5678 --from-remote fork              # pick a range
+git-multi pick abc1234 --to-branch main --push origin           # apply onto main and push
+git-multi pick abc1234 --copy                                   # stage the changes without committing
+```
+
+In the GUI, press `v` in the **Remotes** pane to browse any `remote/branch`,
+multi-select commits with `Space`, toggle copy/target/push (`c`/`t`/`p`),
+preview diffs (`d`), and apply with `Enter`.
+
 ### Stash, tags, reflog
 
 ```bash

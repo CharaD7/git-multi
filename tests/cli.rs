@@ -461,6 +461,76 @@ fn sync_cherry_picks_commits_to_destination_remote() {
 }
 
 // ---------------------------------------------------------------------------
+// pick / cherry-pick across origins
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pick_across_remotes_single_and_range() {
+    let repo = Repo::new();
+    let fork = BareRemote::new("fork");
+    git(repo.path(), &["remote", "add", "fork", &bare_path(&fork.dir)]);
+    git(repo.path(), &["push", "fork", "main"]);
+
+    // A feature branch on the fork with two commits.
+    git(repo.path(), &["checkout", "-b", "feature"]);
+    fs::write(repo.path().join("pick1.txt"), "one\n").unwrap();
+    repo.commit("feat: first pickable commit");
+    let first = git_out(repo.path(), &["rev-parse", "HEAD"]);
+    fs::write(repo.path().join("pick2.txt"), "two\n").unwrap();
+    repo.commit("feat: second pickable commit");
+    let second = git_out(repo.path(), &["rev-parse", "HEAD"]);
+    git(repo.path(), &["push", "fork", "feature"]);
+    git(repo.path(), &["checkout", "main"]);
+
+    // Single pick from the fork onto the current branch.
+    repo.gm()
+        .args(["pick", &first, "--from-remote", "fork"])
+        .assert()
+        .success();
+    let log = git_out(repo.path(), &["log", "--oneline", "main"]);
+    assert!(
+        log.contains("first pickable commit"),
+        "main missing picked commit:\n{}",
+        log
+    );
+
+    // Range pick: the second commit is already the remaining fork commit, so
+    // pick it directly (single spec in range form).
+    repo.gm()
+        .args(["pick", &format!("{}^..{}", second, second), "--from-remote", "fork"])
+        .assert()
+        .success();
+    let log = git_out(repo.path(), &["log", "--oneline", "main"]);
+    assert!(
+        log.contains("second pickable commit"),
+        "main missing range-picked commit:\n{}",
+        log
+    );
+}
+
+#[test]
+fn pick_copy_stages_without_committing() {
+    let repo = Repo::new();
+    git(repo.path(), &["checkout", "-b", "src"]);
+    fs::write(repo.path().join("copy.txt"), "copied\n").unwrap();
+    repo.commit("feat: to be copied");
+    let sha = git_out(repo.path(), &["rev-parse", "HEAD"]);
+    git(repo.path(), &["checkout", "main"]);
+
+    repo.gm().args(["pick", &sha, "--copy"]).assert().success();
+    assert!(repo.path().join("copy.txt").exists(), "file not applied");
+    // Applied but not committed.
+    let head = git_out(repo.path(), &["rev-parse", "HEAD"]);
+    assert_eq!(head, git_out(repo.path(), &["rev-parse", "HEAD"]));
+    let staged = git_out(repo.path(), &["diff", "--cached", "--name-only"]);
+    assert!(
+        staged.contains("copy.txt"),
+        "copy not staged:\n{}",
+        staged
+    );
+}
+
+// ---------------------------------------------------------------------------
 // stash / tag / reflog / completions
 // ---------------------------------------------------------------------------
 

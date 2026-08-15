@@ -239,6 +239,28 @@ impl GitRepo {
         Ok(branches)
     }
 
+    /// List the most recent commits of a remote-tracking branch
+    /// (`refs/remotes/<remote>/<branch>`), newest first.
+    pub fn list_remote_commits(
+        &self,
+        remote: &str,
+        branch: &str,
+        count: usize,
+    ) -> Result<Vec<CommitSummary>> {
+        let workdir = self.workdir();
+        let out = git_run_str(
+            workdir,
+            &[
+                "log",
+                "-n",
+                &count.to_string(),
+                "--format=%H%x00%an%x00%aI%x00%s",
+                &format!("refs/remotes/{}/{}", remote, branch),
+            ],
+        )?;
+        Ok(parse_log_null_sep(&out))
+    }
+
     /// Get current branch name
     pub fn current_branch(&self) -> Result<Option<String>> {
         let head = self.repo.head()?;
@@ -1568,6 +1590,86 @@ impl GitRepo {
         })();
         let _ = self.repo.cleanup_state();
         result
+    }
+
+    /// Apply a list of commits (by spec, e.g. `upstream/abc123`) onto the
+    /// current HEAD or an explicit `target_branch`.
+    ///
+    /// * normal mode — cherry-picks and commits each one, returning the applied
+    ///   commit shas;
+    /// * `copy` mode — `git cherry-pick -n`, staging the changes into the
+    ///   index/worktree without creating commits (a "copy" of the change).
+    ///
+    /// Specs are applied in the order given; pass them oldest-first when
+    /// picking multiple commits from a newest-first list.
+    pub fn pick_commits(
+        &self,
+        specs: &[String],
+        copy: bool,
+        target_branch: Option<&str>,
+    ) -> Result<Vec<String>> {
+        if specs.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some(tb) = target_branch {
+            if self.current_branch()?.as_deref() != Some(tb) {
+                self.checkout_branch(tb)?;
+            }
+        }
+
+        let oids: Vec<git2::Oid> = specs
+            .iter()
+            .map(|s| self.resolve_commit_spec(s))
+            .collect::<Result<_>>()?;
+
+        if copy {
+            let mut args: Vec<String> = vec!["cherry-pick".to_string(), "-n".to_string()];
+            for o in &oids {
+                args.push(o.to_string());
+            }
+            let cargs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = git_run_str(self.workdir(), &cargs) {
+                self.repo.cleanup_state()?;
+                return Err(e);
+            }
+            return Ok(oids.iter().map(|o| o.to_string()).collect());
+        }
+
+        let mut applied = Vec::new();
+        for oid in oids {
+            let commit = self.repo.find_commit(oid)?;
+            let mut opts = git2::CherrypickOptions::new();
+            if let Err(e) = self.repo.cherrypick(&commit, Some(&mut opts)) {
+                self.repo.cleanup_state()?;
+                return Err(GitMultiError::GitError(e));
+            }
+            if self.repo.index()?.has_conflicts() {
+                self.repo.cleanup_state()?;
+                return Err(GitMultiError::SyncConflict);
+            }
+            let result = (|| -> Result<()> {
+                let tree_oid = self.repo.index()?.write_tree()?;
+                let tree = self.repo.find_tree(tree_oid)?;
+                let parent = self.head_commit()?;
+                let parents = [&parent];
+                let sig = self.repo.signature()?;
+                self.repo.commit(
+                    Some("HEAD"),
+                    &sig,
+                    &sig,
+                    &format!("Cherry-pick: {}", commit.summary().unwrap_or("")),
+                    &tree,
+                    &parents,
+                )?;
+                Ok(())
+            })();
+            if let Err(e) = result {
+                self.repo.cleanup_state()?;
+                return Err(e);
+            }
+            applied.push(oid.to_string());
+        }
+        Ok(applied)
     }
 
     // ------------------------------------------------------------------------

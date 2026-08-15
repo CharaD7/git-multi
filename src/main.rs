@@ -83,7 +83,9 @@ fn run(cli: &Cli) -> Result<()> {
             Commands::Graph { all, limit } => cmd_graph(*all, *limit, cli.json),
             Commands::Revert { commit } => cmd_revert(commit.clone()),
             Commands::Reset { mode, target } => cmd_reset(mode.clone(), target.clone()),
-            Commands::Pick { commit } => cmd_pick(commit.clone()),
+            Commands::Pick { commit, from_remote, to_branch, copy, push } => {
+                cmd_pick(commit.clone(), from_remote.clone(), to_branch.clone(), *copy, push.clone())
+            }
             Commands::Stage { path } => {
                 GitRepo::open()?.stage_file(path.as_str())?;
                 println!("{}", style(format!("Staged: {}", path)).green());
@@ -985,10 +987,45 @@ fn cmd_reset(mode: String, target: String) -> Result<()> {
 
 // ========== PICK (cherry-pick) ==========
 
-fn cmd_pick(commit: String) -> Result<()> {
+fn cmd_pick(
+    commit: String,
+    from_remote: Option<String>,
+    to_branch: Option<String>,
+    copy: bool,
+    push: Option<String>,
+) -> Result<()> {
     let repo = GitRepo::open()?;
-    repo.cherry_pick_commit(&commit)?;
-    println!("{}", style(format!("Cherry-picked {}", commit)).green());
+
+    // Auto-fetch the source remote so `upstream/abc123` resolves.
+    if let Some(r) = &from_remote {
+        repo.fetch_remote(r)?;
+    }
+
+    let applied = if commit.contains("..") {
+        // Range pick onto the target branch (or the current branch).
+        let target = to_branch.clone().unwrap_or_else(|| {
+            repo.current_branch()
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "HEAD".to_string())
+        });
+        repo.cherry_pick_range(&commit, &target)?
+    } else {
+        repo.pick_commits(std::slice::from_ref(&commit), copy, to_branch.as_deref())?
+    };
+
+    if let Some(r) = push {
+        let target = to_branch.clone().unwrap_or_else(|| {
+            repo.current_branch()
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+        });
+        repo.push_branches(&r, std::slice::from_ref(&target), false)?;
+    }
+
+    let verb = if copy { "Copied" } else { "Cherry-picked" };
+    println!("{} {} commit(s)", style(verb).green(), applied.len());
     Ok(())
 }
 

@@ -1633,6 +1633,16 @@ fn ui(f: &mut Frame, state: &mut AppState) {
     render_files(f, state, inner[2]);
     render_detail(f, state, inner[3]);
 
+    // Floating idle tooltip, drawn after all panes so it can overflow the
+    // focused pane and use the full terminal width without truncation.
+    let focused_rect = match state.focus {
+        Focus::Remotes => inner[0],
+        Focus::Branches => inner[1],
+        Focus::Files => inner[2],
+        Focus::Detail | Focus::Graph => inner[3],
+    };
+    render_idle_tooltip(f, state, focused_rect);
+
     let base = "[Tab] Focus  [↑/↓] Move  [Space] Toggle  [f] Fetch [p] Push [l] Pull  [M] Merge \
   [C] Commit  [a] Add remote  [c] Branch  [m] Rename  [x] Delete  [D] Default\n\
   [g] Git Graph  [b] Blame file  [d] Diff  [F] Files  [s] Status  [S] Stage/Unstage file  \
@@ -1652,7 +1662,7 @@ fn ui(f: &mut Frame, state: &mut AppState) {
     render_overlay(f, state);
 }
 
-fn render_remotes(f: &mut Frame, state: &AppState, area: Rect) {
+fn render_remotes(f: &mut Frame, state: &mut AppState, area: Rect) {
     let default = state.repo.config.get_default_remote().cloned();
     let items: Vec<ListItem> = state
         .remotes
@@ -1667,13 +1677,10 @@ fn render_remotes(f: &mut Frame, state: &AppState, area: Rect) {
         .block(Block::default().title(title).borders(Borders::ALL).border_style(border_style(state.focus == Focus::Remotes)))
         .highlight_style(Style::default().bg(CYAN).fg(Color::Black))
         .highlight_symbol(">> ");
-    f.render_stateful_widget(list, area, &mut state.remote_state.clone());
-    if state.focus == Focus::Remotes {
-        maybe_tip_and_hover(f, state, area);
-    }
+    f.render_stateful_widget(list, area, &mut state.remote_state);
 }
 
-fn render_branches(f: &mut Frame, state: &AppState, area: Rect) {
+fn render_branches(f: &mut Frame, state: &mut AppState, area: Rect) {
     let search_query = if let Overlay::SearchBranch { value } = &state.overlay {
         value
     } else {
@@ -1718,13 +1725,10 @@ fn render_branches(f: &mut Frame, state: &AppState, area: Rect) {
         .block(block)
         .highlight_style(Style::default().bg(MAUVE).fg(Color::Black))
         .highlight_symbol(">> ");
-    f.render_stateful_widget(branch_list, area, &mut state.branch_state.clone());
-    if state.focus == Focus::Branches {
-        maybe_tip_and_hover(f, state, area);
-    }
+    f.render_stateful_widget(branch_list, area, &mut state.branch_state);
 }
 
-fn render_files(f: &mut Frame, state: &AppState, area: Rect) {
+fn render_files(f: &mut Frame, state: &mut AppState, area: Rect) {
     let (items, title, count) = if state.files_show_commits {
         let search_query = if let Overlay::SearchCommit { value } = &state.overlay {
             value
@@ -1777,10 +1781,7 @@ fn render_files(f: &mut Frame, state: &AppState, area: Rect) {
         .block(block)
         .highlight_style(Style::default().bg(BLUE).fg(Color::Black))
         .highlight_symbol(">> ");
-    f.render_stateful_widget(list, area, &mut state.file_state.clone());
-    if state.focus == Focus::Files {
-        maybe_tip_and_hover(f, state, area);
-    }
+    f.render_stateful_widget(list, area, &mut state.file_state);
 }
 
 fn render_detail(f: &mut Frame, state: &mut AppState, area: Rect) {
@@ -1845,10 +1846,7 @@ fn render_detail(f: &mut Frame, state: &mut AppState, area: Rect) {
             .block(Block::default().title(state.detail_mode.title()).borders(Borders::ALL).border_style(Style::default().fg(MAUVE)))
             .highlight_style(Style::default().bg(ORANGE).fg(Color::Black))
             .highlight_symbol(">> ");
-        f.render_stateful_widget(list, area, &mut state.graph_state.clone());
-    }
-    if state.focus == Focus::Detail || state.focus == Focus::Graph {
-        maybe_tip_and_hover(f, state, area);
+        f.render_stateful_widget(list, area, &mut state.graph_state);
     }
 }
 
@@ -2388,17 +2386,99 @@ fn render_pr_detail(f: &mut Frame, state: &AppState, number: u32, tab: PrTab) {
     glass_modal(f, 88, 34, &format!(" Pull Request #{} ", number), text, VIBRANT_PINK);
 }
 
-/// Draw a passive idle tip box at the bottom of a pane.
-fn draw_pane_tip(f: &mut Frame, area: Rect, text: &str) {
-    let width = area.width.saturating_sub(2);
-    if width < 10 {
+/// The y coordinate of the focused list's selected row inside a pane, accounting
+/// for the top border and any scroll offset. Used to anchor the idle tooltip.
+fn selected_row_y(pane_y: u16, selected: usize, offset: usize) -> u16 {
+    pane_y + 1 + (selected.saturating_sub(offset)) as u16
+}
+
+/// Compute the tooltip box for the given cursor row/column, clamped to the
+/// terminal. Places the box just below the cursor, flipping above it when it
+/// would overflow the bottom edge.
+fn tooltip_rect(cursor: (u16, u16), content_width: u16, content_height: u16, term: Rect) -> Rect {
+    let right = term.right();
+    let bottom = term.bottom();
+    let mut width = content_width.min(right.saturating_sub(cursor.0)).max(8);
+    let x = cursor.0.clamp(term.x, right.saturating_sub(width));
+    // shrink width again if clamping pushed x but width no longer fits
+    width = width.min(right.saturating_sub(x));
+    let mut y = cursor.1.saturating_add(1);
+    if y.saturating_add(content_height) > bottom {
+        y = cursor.1.saturating_sub(content_height);
+    }
+    y = y.clamp(term.y, bottom.saturating_sub(content_height).max(term.y));
+    Rect::new(x, y, width, content_height)
+}
+
+/// Estimate the number of rows a wrapped line occupies in `width` columns.
+fn wrap_height(line: &str, width: u16) -> u16 {
+    let width = width.max(1) as usize;
+    let chars = line.chars().count();
+    chars.div_ceil(width).max(1) as u16
+}
+
+/// Draw the passive idle tooltip: a floating, bordered box anchored below the
+/// focused pane's selected row, combining the pane's action hints with the
+/// selected item's hover preview. Uses the full terminal width when possible,
+/// so long hints are never truncated to the pane's width.
+fn render_idle_tooltip(f: &mut Frame, state: &AppState, pane: Rect) {
+    if !state.tip_visible {
         return;
     }
-    let tip_area = Rect::new(area.x + 1, area.bottom().saturating_sub(3).max(area.y + 1), width.min(text.len() as u16), 1);
-    let p = Paragraph::new(text)
-        .block(Block::default().borders(Borders::NONE).style(Style::default().fg(Color::Black).bg(YELLOW)))
-        .style(Style::default().fg(Color::Black).bg(YELLOW));
-    f.render_widget(p, tip_area);
+    if !matches!(state.overlay, Overlay::None) {
+        return;
+    }
+    let mut lines: Vec<String> = Vec::new();
+    if let Some(tip) = state.focus_tip() {
+        lines.push(tip);
+    }
+    if let Some(hover) = hover_text(state) {
+        lines.push(String::new());
+        lines.push(hover);
+    }
+    if lines.is_empty() {
+        return;
+    }
+
+    // Anchor below the selected row; fall back to the pane's top row when the
+    // focused pane has no item list selection (e.g. Detail modes).
+    let (selected, offset) = match state.focus {
+        Focus::Remotes => (state.remote_state.selected(), state.remote_state.offset()),
+        Focus::Branches => (state.branch_state.selected(), state.branch_state.offset()),
+        Focus::Files => (state.file_state.selected(), state.file_state.offset()),
+        Focus::Graph => (state.graph_state.selected(), state.graph_state.offset()),
+        Focus::Detail => (None, 0),
+    };
+    let cursor_y = selected
+        .map(|i| selected_row_y(pane.y, i, offset))
+        .unwrap_or(pane.y + 1);
+    let cursor_x = pane.x + 2;
+
+    let term = f.area();
+    let max_width = term.width.saturating_sub(2);
+    let width = lines
+        .iter()
+        .map(|l| l.chars().count().min(max_width as usize) as u16)
+        .max()
+        .unwrap_or(max_width)
+        .min(max_width)
+        .max(20);
+    let height = lines.iter().map(|l| wrap_height(l, width)).sum::<u16>() + 2; // + borders
+
+    let area = tooltip_rect((cursor_x, cursor_y), width, height, term);
+
+    let accent = match state.focus {
+        Focus::Remotes => CYAN,
+        Focus::Branches => MAUVE,
+        Focus::Files => BLUE,
+        Focus::Detail | Focus::Graph => ORANGE,
+    };
+    let text = lines.join("\n");
+    let tip = Paragraph::new(text)
+        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(accent)))
+        .style(Style::default().fg(CREAM).bg(Color::Rgb(30, 30, 45)))
+        .wrap(Wrap { trim: false });
+    f.render_widget(tip, area);
 }
 
 /// Build a hover preview for the focused pane's selected item (idle previews).
@@ -2448,27 +2528,6 @@ fn hover_text(state: &AppState) -> Option<String> {
             }
         }
         Focus::Detail => None,
-    }
-}
-
-/// Draw the passive idle tip (bottom) and hover preview (top) inside a pane
-/// when the idle engine has armed them for the focused pane.
-fn maybe_tip_and_hover(f: &mut Frame, state: &AppState, area: Rect) {
-    if !state.tip_visible {
-        return;
-    }
-    if !matches!(state.overlay, Overlay::None) {
-        return;
-    }
-    if let Some(tip) = state.focus_tip() {
-        draw_pane_tip(f, area, &tip);
-    }
-    if let Some(hover) = hover_text(state) {
-        let width = area.width.saturating_sub(2).min(hover.len() as u16).max(10);
-        let hover_area = Rect::new(area.x + 1, area.y + 1, width, 1);
-        let p = Paragraph::new(hover)
-            .style(Style::default().fg(CREAM).bg(Color::Rgb(45, 45, 60)));
-        f.render_widget(p, hover_area);
     }
 }
 
@@ -3601,5 +3660,53 @@ mod tests {
         assert_eq!(avatar_initials("chara7"), "CH");
         assert_eq!(avatar_initials("a"), "A");
         assert_eq!(avatar_initials("abc"), "AB");
+    }
+
+    #[test]
+    fn selected_row_y_accounts_for_border_and_scroll() {
+        // First row selected, no scroll -> just below the top border.
+        assert_eq!(selected_row_y(5, 0, 0), 6);
+        // Scrolled so the selected item is the 4th visible row
+        // (index 7 with offset 3 hides rows 0..2).
+        assert_eq!(selected_row_y(5, 7, 3), 10);
+    }
+
+    #[test]
+    fn tooltip_rect_places_below_cursor() {
+        let term = Rect::new(0, 0, 120, 40);
+        let r = tooltip_rect((10, 5), 50, 3, term);
+        assert_eq!(r.x, 10);
+        assert_eq!(r.y, 6); // just below the cursor
+        assert_eq!(r.width, 50);
+        assert_eq!(r.height, 3);
+    }
+
+    #[test]
+    fn tooltip_rect_flips_above_when_no_room_below() {
+        let term = Rect::new(0, 0, 120, 40);
+        // Cursor near the bottom: below would overflow, so flip above.
+        let r = tooltip_rect((10, 38), 50, 4, term);
+        assert_eq!(r.y, 34); // 38 - 4, above the cursor
+        assert!(r.bottom() <= term.bottom());
+    }
+
+    #[test]
+    fn tooltip_rect_clamps_to_terminal() {
+        let term = Rect::new(0, 0, 60, 20);
+        // Cursor at the far right: width shrinks to fit.
+        let r = tooltip_rect((58, 3), 50, 3, term);
+        assert!(r.right() <= term.right());
+        assert!(r.width <= 60);
+        // Cursor at the bottom edge: y is clamped into the terminal.
+        let r2 = tooltip_rect((5, 19), 20, 2, term);
+        assert!(r2.y < term.bottom());
+        assert!(r2.bottom() <= term.bottom());
+    }
+
+    #[test]
+    fn wrap_height_estimates_rows() {
+        assert_eq!(wrap_height("hello", 10), 1);
+        assert_eq!(wrap_height("hello world", 5), 3); // 11 chars / 5 cols
+        assert_eq!(wrap_height("", 5), 1);
     }
 }

@@ -68,8 +68,7 @@ jobs:
           cp target/debian/*.deb dist/
           find target -name '*.rpm' -exec cp {} dist/ \;
           cp git-multi-x86_64-unknown-linux-gnu.AppImage dist/
-          cp target/release/git-multi git-multi-bin
-          tar cJf dist/git-multi-x86_64-unknown-linux-gnu.tar.xz git-multi-bin
+          tar cJf dist/git-multi-x86_64-unknown-linux-gnu.tar.xz -C target/release git-multi
 
       - uses: actions/upload-artifact@v4
         with:

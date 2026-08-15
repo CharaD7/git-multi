@@ -36,6 +36,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ASCII `git log --graph` rendering in the GUI Graph panel, with `Enter` to
   cherry-pick and `D` to preview a commit diff directly from the graph.
 - Integration test suite (`tests/cli.rs`).
+- Keymap registry: all shortcuts live in a single table that drives dispatch,
+  the `?` cheatsheet, the `^+P` command palette, and idle tips — so they can
+  never drift. A unit test asserts no duplicate key bindings.
+- `?` cheatsheet: scrollable reference of every shortcut grouped by scope with
+  a one-line description.
+- `^+P` command palette: fuzzy-search any action by name and run it, so every
+  git verb is reachable without memorizing keys.
+- Idle tips & hovers: after ~10s idle on a pane (configurable via
+  `[gui] idle_tips / idle_tip_delay_secs / idle_previews`), a passive hint box
+  shows the pane's actions and a hover preview shows the selected item's info
+  (file status + recency, branch last-commit + ahead/behind, remote URL, graph
+  node).
+- Visualizations: `h` commit-activity heatmap (weekday × hour grid + totals),
+  `G` full-screen Git Graph, `H`/`L` GitLens file/line history, `t` tags modal,
+  `U` stash modal (save/apply/pop/drop), `W` worktree/branch status,
+  `Y` copy HEAD sha.
+- GitHub integration via `gh`: `N` contributors (colored initials avatars +
+  commit counts; falls back to `git shortlog` offline) with a translucent
+  profile modal, and `o` pull-request browser with list filters, a tabbed
+  detail modal (milestone, labels/scope, assignees, reviewers, commits, files,
+  description) and actions (merge with strategy, close/reopen, comment/review,
+  checkout, open in browser, edit, labels, milestone, reviewers, assign).
+- Action-gap coverage: `Enter` checks out the selected branch, Files pane
+  `X`/`V` run `git rm`/`git mv`, Branches `K` rebases onto a ref, Detail `X`
+  runs `git show`, PR detail `C` checks out the PR locally.
 
 ### Fixed
 - Auto-save no longer stages everything into the real index (`git add -A` was

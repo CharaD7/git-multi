@@ -29,6 +29,16 @@ A CLI tool for managing multiple Git remotes and syncing content between them. `
   timeout. In the GUI, fetch/push/pull/merge/commit run on a background worker thread, so the
   interface stays responsive instead of freezing mid-operation.
 - **Extras:** stash, tags, reflog, `--json` output for scripting, and shell completions.
+- **Cheatsheet & palette:** press `?` for a scrollable reference of every shortcut, or
+  `Ctrl+P` for a fuzzy command palette that can run any git action by name.
+- **Idle tips & hovers:** idle on a pane for ~10s and a passive hint shows the available
+  actions plus a preview of the selected item (file recency, branch ahead/behind, remote URL,
+  graph node). Configure via `[gui]` in `.gitmulti/config.toml`.
+- **GitHub (via `gh`):** `N` lists contributors with avatar blocks and opens translucent
+  profiles; `o` browses and manages pull requests (milestone, labels/scope, assignees,
+  reviewers, commits, files, merge/close/review/comment/checkout/labels/milestone/reviewers).
+- **Visualizations:** `h` commit-activity heatmap, `G` full-screen Git Graph, `H`/`L`
+  GitLens file/line history, `t` tags, `U` stash, `W` worktree status.
 
 ## Installation
 

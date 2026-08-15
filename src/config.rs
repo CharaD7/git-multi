@@ -67,6 +67,11 @@ impl Config {
         if !config_path.exists() {
             let mut config = Self::default();
             config.reconcile_with_git(repo)?;
+            // Persist the reconciled config so the file exists on first open
+            // (matches the README, which documents `.gitmulti/config.toml`).
+            if config_path.parent().is_some() {
+                config.save(repo)?;
+            }
             return Ok(config);
         }
 
@@ -124,7 +129,7 @@ impl Config {
         }
 
         // Ensure the default remote still points at an existing remote.
-        if self.default_remote.as_deref().map_or(true, |d| !git_names.iter().any(|g| g == d)) {
+        if self.default_remote.as_deref().is_none_or(|d| !git_names.iter().any(|g| g == d)) {
             self.default_remote = git_names.first().cloned();
         }
 

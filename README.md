@@ -22,6 +22,13 @@ A CLI tool for managing multiple Git remotes and syncing content between them. `
 - **Auto-save safety net in the GUI:** when you are idle for ~30s, the current dirty state is
   captured into `refs/gitmulti/autosave` (not a normal branch). If something like an AI-driven
   `git reset --hard` happens, press `O` to restore from that snapshot without losing work.
+  The snapshot is staged against a throwaway index, so your own staging decisions are never
+  disturbed.
+- **Never hangs:** every `git` subprocess is run with prompts disabled
+  (`GIT_TERMINAL_PROMPT=0`), non-interactive SSH batch mode, captured output, and a hard
+  timeout. In the GUI, fetch/push/pull/merge/commit run on a background worker thread, so the
+  interface stays responsive instead of freezing mid-operation.
+- **Extras:** stash, tags, reflog, `--json` output for scripting, and shell completions.
 
 ## Installation
 
@@ -222,8 +229,10 @@ git-multi commit "fix: null deref" --body "Guard the optional before unwrap."
 git-multi commit "fix: null deref (amended)" --amend
 
 # Stage / unstage individual files
-git-multi stage src/main.rs          # not yet exposed as a subcommand; use the GUI (S) or `git`
+git-multi stage src/main.rs
+git-multi stage .                     # stage everything
 git-multi unstage src/main.rs
+git-multi restore src/main.rs         # discard working-tree changes
 
 # Diffs
 git-multi diff unstaged              # working tree vs index
@@ -262,6 +271,42 @@ git-multi graph --all --limit 200
 All of the above (plus granular stage/unstage, amend, revert, reset, and cherry-pick) are
 also available directly inside the GUI — see [GUI Mode](#gui-mode).
 
+### Stash, tags, reflog
+
+```bash
+# Stash / pop / list
+git-multi stash save "wip: progress"     # or: git-multi stash save
+git-multi stash pop
+git-multi stash list
+
+# Tags
+git-multi tag list
+git-multi tag create v1.0.0 HEAD --message "release"
+git-multi tag delete v1.0.0
+
+# Reflog
+git-multi reflog --count 30
+```
+
+### Machine-readable output
+
+Add `--json` to `status`, `list`, `graph`, `remote list`, or `branch list` to get
+structured output suitable for scripting:
+
+```bash
+git-multi --json status
+git-multi --json branch list --all
+git-multi --json graph --limit 50
+```
+
+### Shell completions
+
+```bash
+git-multi completions bash > ~/.local/share/bash-completion/completions/git-multi
+git-multi completions zsh  > ~/.zfunc/_git-multi
+git-multi completions fish > ~/.config/fish/completions/git-multi.fish
+```
+
 ### Auto-save safety net
 
 When you are working in the TUI and stop typing for about **30 seconds**, `git-multi`
@@ -282,19 +327,19 @@ This is intended as a last-resort safety net, not a replacement for real commits
 When you are happy with your work, commit it normally so it becomes part of your
 branch history.
 
-### Self-update (planned)
+### Self-update
 
-A future `git-multi self-update` command will download the matching GitHub Release
-asset for your platform and replace the running binary in place, making it easier to
-stay current without using Cargo or a system package manager.
+`git-multi self-update` downloads the matching GitHub Release asset for your
+platform and replaces the running binary in place.
 
 In scope:
-- Linux (`AppImage` / `tar.xz`), Windows (`.zip` with `.exe`), macOS (`.pkg` / `tar.xz`).
+- Linux (`tar.xz`), Windows (`.zip` with `.exe`), macOS (`tar.xz`).
 - Portable / manually-extracted installs: replaced in place.
 - Cargo installs (`.cargo/bin`) and package-managed installs (`.deb`, `.rpm`, `.pkg`, `.msi`): refused with a clear "use your installer instead" message.
 - Backup of the previous binary to `{binary}.previous.{pid}`.
+- Every network step has a hard timeout so a dead host cannot hang the process.
 
-Not in scope for the initial implementation: delta updates, background TUI update checks, or automated rollback. If you need the feature sooner, upvote/star the repo or open an issue tagging `self-update`.
+Not in scope: delta updates, background TUI update checks, or automated rollback.
 
 ## Configuration
 

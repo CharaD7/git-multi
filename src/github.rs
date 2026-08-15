@@ -127,6 +127,21 @@ pub fn gh_available() -> bool {
         .unwrap_or(false)
 }
 
+/// The signed-in GitHub username (`gh api user` -> `login`), falling back to
+/// the owner segment of the repo slug when `gh` is unavailable/unsigned.
+pub fn current_user(repo: &GitRepo) -> Option<String> {
+    let workdir = repo.workdir_public();
+    if let Ok(v) = gh(workdir, &["api", "user"]) {
+        let login = get_str(&v, "login");
+        if !login.is_empty() {
+            return Some(login);
+        }
+    }
+    resolve_slug(repo)
+        .ok()
+        .and_then(|s| s.split('/').next().map(|o| o.to_string()))
+}
+
 fn get_str(v: &Value, key: &str) -> String {
     v.get(key).and_then(|x| x.as_str()).unwrap_or("").to_string()
 }

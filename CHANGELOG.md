@@ -37,11 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cherry-pick and `D` to preview a commit diff directly from the graph.
 - Integration test suite (`tests/cli.rs`).
 - Keymap registry: all shortcuts live in a single table that drives dispatch,
-  the `?` cheatsheet, the `^+P` command palette, and idle tips — so they can
+  the `?` cheatsheet, the `Ctrl+P` command palette, and idle tips — so they can
   never drift. A unit test asserts no duplicate key bindings.
 - `?` cheatsheet: scrollable reference of every shortcut grouped by scope with
   a one-line description.
-- `^+P` command palette: fuzzy-search any action by name and run it, so every
+- `Ctrl+P` command palette: fuzzy-search any action by name and run it, so every
   git verb is reachable without memorizing keys.
 - Idle tips & hovers: after ~10s idle on a pane (configurable via
   `[gui] idle_tips / idle_tip_delay_secs / idle_previews`), a passive hint box
@@ -69,6 +69,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (Space), toggle copy/target/push (`c`/`t`/`p`), preview diffs (`d`), and
   apply (`Enter`). The cherry-pick overlay (Files `P`, graph `Enter`) now also
   supports `t`/`c`/`p`.
+- Animated welcome screen on launch: shows your machine hostname and GitHub
+  username (from `gh api user`), a typewritten blurb about the tool, and
+  navigable buttons (Continue, Skip intro, `?` Cheatsheet, `Ctrl+P` Palette,
+  "Don't show again"). The playground then dissolves in with a warp/bounce
+  transition, and the identity is shown in a new top bar (hostname left,
+  GitHub username right). Configure via `[gui] show_welcome`.
 
 ### Fixed
 - Auto-save no longer stages everything into the real index (`git add -A` was

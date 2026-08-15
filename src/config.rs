@@ -57,6 +57,9 @@ pub struct GuiPreferences {
     /// Default PR state filter in the PRs modal ("open", "closed", "merged").
     #[serde(default = "default_pr_state")]
     pub pr_default_state: String,
+    /// Show the animated welcome screen on launch.
+    #[serde(default = "default_true")]
+    pub show_welcome: bool,
 }
 
 impl Default for GuiPreferences {
@@ -68,6 +71,7 @@ impl Default for GuiPreferences {
             github: "auto".to_string(),
             contributors_fallback: "shortlog".to_string(),
             pr_default_state: "open".to_string(),
+            show_welcome: true,
         }
     }
 }

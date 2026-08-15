@@ -60,6 +60,12 @@ Launch the terminal user interface:
 ```bash
 git-multi --gui
 ```
+On launch you get an animated **welcome screen** showing your machine hostname and
+GitHub username, with navigable buttons — Continue, Skip intro, `?` cheatsheet,
+`Ctrl+P` palette, and "Don't show again" (persisted to `[gui] show_welcome`). The
+playground then bounces in; your hostname and GitHub username stay visible in the
+bold top bar.
+
 The GUI is a five-panel terminal UI: **Remotes | Branches | Files | Detail | Log**, with an
 interactive **Git Graph** mode. The remote, branch, and file lists auto-refresh on demand
 (`r`), so changes made inside or outside the app show up when you refresh.

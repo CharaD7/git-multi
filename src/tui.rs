@@ -26,6 +26,19 @@ const YELLOW: Color = Color::Rgb(255, 209, 102);
 const BLUE: Color = Color::Rgb(120, 180, 255);
 const ORANGE: Color = Color::Rgb(255, 159, 64);
 
+/// Best-effort machine hostname from environment variables.
+fn hostname() -> String {
+    for key in ["HOSTNAME", "HOST", "COMPUTERNAME"] {
+        if let Ok(v) = std::env::var(key) {
+            let v = v.trim().to_string();
+            if !v.is_empty() {
+                return v;
+            }
+        }
+    }
+    "unknown".to_string()
+}
+
 #[derive(Default, Clone)]
 enum Overlay {
     #[default]
@@ -175,7 +188,7 @@ impl Key {
     fn label(self) -> String {
         match self {
             Key::Char(c) => c.to_string(),
-            Key::CtrlChar(c) => format!("^+{}", c),
+            Key::CtrlChar(c) => format!("Ctrl+{}", c),
             Key::Tab => "Tab".to_string(),
             Key::Up => "↑".to_string(),
             Key::Down => "↓".to_string(),
@@ -364,6 +377,12 @@ struct PickBrowseState {
     marks: Vec<bool>,
 }
 
+/// An in-progress screen transition (welcome -> playground).
+struct Transition {
+    start: Instant,
+    duration: Duration,
+}
+
 /// A blocking git operation handed off to the background worker thread so the
 /// UI never freezes while fetch/push/pull/merge/commit run.
 enum UiJob {
@@ -508,6 +527,14 @@ struct AppState {
     pick_target: String,
     pick_copy: bool,
     pick_push: bool,
+    // Welcome screen / identity
+    welcome: bool,
+    welcome_start: Instant,
+    welcome_button: usize,
+    transition: Option<Transition>,
+    transition_from_welcome: bool,
+    host: String,
+    gh_user: Option<String>,
 }
 
 impl AppState {
@@ -522,6 +549,9 @@ impl AppState {
         std::thread::spawn(move || tui_worker(job_rx, result_tx));
 
         let gui = repo.config.gui.clone();
+        let host = hostname();
+        let gh_user = crate::github::current_user(&repo);
+        let show_welcome = gui.show_welcome;
         let mut state = Self {
             repo,
             remotes: Vec::new(),
@@ -578,6 +608,13 @@ impl AppState {
             pick_target: String::new(),
             pick_copy: false,
             pick_push: false,
+            welcome: show_welcome,
+            welcome_start: Instant::now(),
+            welcome_button: 0,
+            transition: None,
+            transition_from_welcome: false,
+            host,
+            gh_user,
         };
         state.refresh();
         state.remote_state.select(Some(0));
@@ -873,6 +910,41 @@ impl AppState {
 
     fn do_quit(&mut self) {
         self.quit = true;
+    }
+
+    /// Poll interval: animate the welcome/transition smoothly, otherwise relax.
+    fn poll_delay(&self) -> Duration {
+        if self.welcome || self.transition.is_some() {
+            Duration::from_millis(16)
+        } else {
+            Duration::from_millis(100)
+        }
+    }
+
+    /// Leave the welcome screen and bounce into the playground.
+    fn start_tool(&mut self) {
+        self.welcome = false;
+        self.transition = Some(Transition {
+            start: Instant::now(),
+            duration: Duration::from_millis(900),
+        });
+        self.transition_from_welcome = true;
+    }
+
+    /// Activate the focused welcome button.
+    fn activate_welcome_button(&mut self) {
+        match self.welcome_button {
+            0 | 1 => self.start_tool(), // Continue → / Skip intro
+            2 => self.overlay = Overlay::Help { scroll: 0 },
+            3 => self.open_palette(),
+            4 => {
+                // ✓ Don't show again
+                self.repo.config.gui.show_welcome = false;
+                let _ = self.repo.config.save(&self.repo.repo);
+                self.start_tool();
+            }
+            _ => self.start_tool(),
+        }
     }
 
     fn toggle_branch_sel(&mut self) {
@@ -1704,10 +1776,19 @@ pub fn run_tui() -> io::Result<()> {
         if handle_events(&mut state)? {
             break;
         }
+        // Clear a finished transition so the playground renders normally.
+        if let Some(tr) = state.transition.as_ref() {
+            if tr.start.elapsed() >= tr.duration {
+                state.transition = None;
+                state.transition_from_welcome = false;
+            }
+        }
         // Idle engine: show per-pane tips/hovers after `idle_tip_delay_secs`
         // without any keypress. Any keypress resets `last_activity`, so "idle"
-        // already implies "not navigating".
-        if state.gui.idle_tips
+        // already implies "not navigating". Paused during welcome/transition.
+        let in_playground = !state.welcome && state.transition.is_none();
+        if in_playground
+            && state.gui.idle_tips
             && matches!(state.overlay, Overlay::None)
             && !state.is_busy()
             && state.last_activity.elapsed() >= Duration::from_secs(state.gui.idle_tip_delay_secs)
@@ -1719,7 +1800,8 @@ pub fn run_tui() -> io::Result<()> {
                 state.hover_cache = None;
             }
         }
-        if state.autosave_ref_exists
+        if in_playground
+            && state.autosave_ref_exists
             && !state.autosave_pending
             && state.last_activity.elapsed() >= Duration::from_secs(30)
         {
@@ -1733,10 +1815,36 @@ pub fn run_tui() -> io::Result<()> {
 }
 
 fn ui(f: &mut Frame, state: &mut AppState) {
+    if let Some(tr) = state.transition.as_ref() {
+        // Dissolve + warp transition from the welcome screen into the playground.
+        let elapsed = tr.start.elapsed().as_secs_f64();
+        let t = (elapsed / tr.duration.as_secs_f64()).clamp(0.0, 1.0);
+        if state.transition_from_welcome {
+            let wipe_frac = (t * 2.0).clamp(0.0, 1.0);
+            let wipe_h = (f.area().height as f64 * (1.0 - wipe_frac)) as u16;
+            render_welcome(f, state, Rect::new(0, 0, f.area().width, wipe_h));
+        }
+        let offset = (f.area().height as f64 * (1.0 - ease_out_bounce(t))) as u16;
+        render_playground(f, state, Rect::new(0, offset, f.area().width, f.area().height));
+    } else if state.welcome {
+        render_welcome(f, state, f.area());
+    } else {
+        render_playground(f, state, f.area());
+    }
+    render_overlay(f, state);
+}
+
+/// The main playground: identity top bar, panes, status bar, help footer.
+fn render_playground(f: &mut Frame, state: &mut AppState, area: Rect) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(1), Constraint::Length(3)])
-        .split(f.area());
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+            Constraint::Length(3),
+        ])
+        .split(area);
 
     let inner = Layout::default()
         .direction(Direction::Horizontal)
@@ -1746,14 +1854,15 @@ fn ui(f: &mut Frame, state: &mut AppState) {
             Constraint::Percentage(20),
             Constraint::Percentage(44),
         ])
-        .split(layout[0]);
+        .split(layout[1]);
 
+    render_top_bar(f, state, layout[0]);
     render_remotes(f, state, inner[0]);
     render_branches(f, state, inner[1]);
     render_files(f, state, inner[2]);
     render_detail(f, state, inner[3]);
 
-    render_status_bar(f, state, layout[1]);
+    render_status_bar(f, state, layout[2]);
 
     // Floating idle tooltip, drawn after all panes so it can overflow the
     // focused pane and use the full terminal width without truncation.
@@ -1779,9 +1888,168 @@ fn ui(f: &mut Frame, state: &mut AppState) {
     let footer = Paragraph::new(help)
         .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(CYAN)))
         .style(Style::default().fg(CREAM).bg(Color::Rgb(50, 50, 50)));
-    f.render_widget(footer, layout[2]);
+    f.render_widget(footer, layout[3]);
+}
 
-    render_overlay(f, state);
+/// Identity bar at the top: hostname (left) and GitHub username (right),
+/// both bold and colored.
+fn render_top_bar(f: &mut Frame, state: &AppState, area: Rect) {
+    let host = if state.host.is_empty() { "unknown".to_string() } else { state.host.clone() };
+    let user = state.gh_user.as_deref().unwrap_or("not signed in");
+    let left = format!("▸ {}", host);
+    let right = user.to_string();
+    let pad = area.width.saturating_sub(2).saturating_sub(left.chars().count() as u16 + right.chars().count() as u16 + 1);
+    let line = Line::from(vec![
+        Span::styled(left, Style::default().fg(CYAN).add_modifier(Modifier::BOLD)),
+        Span::raw(" ".repeat(pad as usize)),
+        Span::styled(right, Style::default().fg(GREEN).add_modifier(Modifier::BOLD)),
+    ]);
+    let p = Paragraph::new(line).style(Style::default().bg(Color::Rgb(35, 35, 45)));
+    f.render_widget(p, area);
+}
+
+const WELCOME_BUTTONS: [&str; 5] = [
+    "Continue →",
+    "Skip intro",
+    "? Cheatsheet",
+    "Ctrl+P Palette",
+    "✓ Don't show again",
+];
+
+const WELCOME_BLURB: &str = "\
+git-multi is a CLI + TUI for managing multiple Git remotes.
+Fetch, push, pull, cherry-pick and sync across origins from one view.
+Browse remote branches and pick commits, manage pull requests,
+blame lines GitLens-style, read the commit graph, and keep an
+auto-save safety net for your working tree.
+
+Everything is one key away: press ? for the cheatsheet or
+Ctrl+P to run any action by name.";
+
+/// The animated welcome screen: pulsing title, hostname + GitHub username,
+/// a typewritten blurb, and navigable buttons.
+fn render_welcome(f: &mut Frame, state: &AppState, area: Rect) {
+    if area.width < 40 || area.height < 12 {
+        return;
+    }
+    let elapsed = state.welcome_start.elapsed().as_millis() as usize;
+
+    let total = WELCOME_BLURB.chars().count();
+    let typed = (elapsed / 14).min(total);
+    let mut blurb: String = WELCOME_BLURB.chars().take(typed).collect();
+    // Blinking cursor while the blurb is still typing.
+    if typed < total && (elapsed / 400).is_multiple_of(2) {
+        blurb.push('█');
+    }
+
+    let pulse = (elapsed as f64 / 600.0 * std::f64::consts::TAU).sin();
+    let title_fg = if pulse > 0.0 { VIBRANT_PINK } else { CYAN };
+
+    let inner_w = (area.width.saturating_sub(4)) as usize;
+    let user = state.gh_user.as_deref().unwrap_or("not signed in");
+    let identity = format!("{}  ·  {}", state.host, user);
+
+    // Assemble centered content.
+    let wrapped = wrap_text(&blurb, inner_w);
+    let mut rows: Vec<String> = Vec::new();
+    rows.push(center_pad("git-multi", inner_w));
+    rows.push(center_pad(&identity, inner_w));
+    rows.push(String::new());
+    for l in &wrapped {
+        rows.push(center_pad(l, inner_w));
+    }
+    rows.push(String::new());
+
+    // Button row: the focused button is highlighted.
+    let btn_total: usize = WELCOME_BUTTONS.iter().map(|b| b.chars().count()).sum::<usize>()
+        + (WELCOME_BUTTONS.len() - 1) * 3;
+    let btn_left = if btn_total < inner_w { (inner_w - btn_total) / 2 } else { 0 };
+    let mut btn_text = " ".repeat(btn_left);
+    for (i, b) in WELCOME_BUTTONS.iter().enumerate() {
+        if i > 0 {
+            btn_text.push_str("   ");
+        }
+        if i == state.welcome_button {
+            btn_text.push_str(&format!("▶ {} ◀", b));
+        } else {
+            btn_text.push_str(b);
+        }
+    }
+    rows.push(center_pad(&btn_text, inner_w));
+    rows.push(String::new());
+    rows.push(center_pad("Enter: activate · Tab/↑↓: move · ?: cheatsheet · Ctrl+P: palette · q: skip intro", inner_w));
+
+    // Vertical centering.
+    let avail = (area.height as usize).saturating_sub(2);
+    let top_pad = if rows.len() < avail { (avail - rows.len()) / 2 } else { 0 };
+
+    let mut text = String::new();
+    for _ in 0..top_pad {
+        text.push('\n');
+    }
+    for l in &rows {
+        text.push_str(l);
+        text.push('\n');
+    }
+
+    let block = Block::default()
+        .title(" git-multi — multi-remote Git control center ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(title_fg));
+    let p = Paragraph::new(text)
+        .block(block)
+        .style(Style::default().fg(CREAM));
+    f.render_widget(ratatui::widgets::Clear, area);
+    f.render_widget(p, area);
+}
+
+/// Center-pad a line to `width` characters.
+fn center_pad(text: &str, width: usize) -> String {
+    let w = text.chars().count();
+    if w >= width {
+        return text.to_string();
+    }
+    let left = (width - w) / 2;
+    format!("{}{}", " ".repeat(left), text)
+}
+
+/// Word-wrap a string to `width` columns.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let width = width.max(1);
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        if !current.is_empty() && current.chars().count() + word.chars().count() + 1 > width {
+            out.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
+/// Standard ease-out-bounce curve (0..1) for the playground drop-in.
+fn ease_out_bounce(t: f64) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    let n1 = 7.5625;
+    let d1 = 2.75;
+    if t < 1.0 / d1 {
+        n1 * t * t
+    } else if t < 2.0 / d1 {
+        let t = t - 1.5 / d1;
+        n1 * t * t + 0.75
+    } else if t < 2.5 / d1 {
+        let t = t - 2.25 / d1;
+        n1 * t * t + 0.9375
+    } else {
+        let t = t - 2.625 / d1;
+        n1 * t * t + 0.984375
+    }
 }
 
 /// Build the status-bar text: `◆ branch @ short_sha  ↑ remote  (+a/-b)`.
@@ -2171,7 +2439,7 @@ fn render_help(f: &mut Frame, scroll: u16) {
             }
         }
     }
-    text.push_str("\nTip: press ^+P to run any action by name.\n");
+    text.push_str("\nTip: press Ctrl+P to run any action by name.\n");
 
     let p = Paragraph::new(text)
         .block(Block::default().title(" Cheatsheet ").borders(Borders::ALL).border_style(Style::default().fg(VIBRANT_PINK)))
@@ -2980,12 +3248,16 @@ fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
 }
 
 fn handle_events(state: &mut AppState) -> io::Result<bool> {
-    if event::poll(Duration::from_millis(100))? {
+    if event::poll(state.poll_delay())? {
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Press {
                 state.last_activity = Instant::now();
                 state.tip_visible = false;
                 if handle_overlay(state, key) {
+                    return Ok(false);
+                }
+                if state.welcome {
+                    handle_welcome_key(state, &key);
                     return Ok(false);
                 }
                 if let Some(k) = parse_key(&key) {
@@ -2998,6 +3270,24 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
         }
     }
     Ok(false)
+}
+
+/// Key handling for the welcome screen (buttons + direct shortcuts).
+fn handle_welcome_key(state: &mut AppState, key: &crossterm::event::KeyEvent) {
+    let Some(k) = parse_key(key) else { return };
+    match k {
+        Key::Char('?') => state.overlay = Overlay::Help { scroll: 0 },
+        Key::CtrlChar('p') => state.open_palette(),
+        Key::Char('q') | Key::Esc => state.start_tool(),
+        Key::Tab | Key::Right | Key::Down => {
+            state.welcome_button = (state.welcome_button + 1) % WELCOME_BUTTONS.len();
+        }
+        Key::Left | Key::Up => {
+            state.welcome_button = (state.welcome_button + WELCOME_BUTTONS.len() - 1) % WELCOME_BUTTONS.len();
+        }
+        Key::Enter | Key::Char(' ') => state.activate_welcome_button(),
+        _ => {}
+    }
 }
 
 /// Look up a key in the binding registry. Focus-scoped bindings take

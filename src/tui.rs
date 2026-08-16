@@ -1037,15 +1037,9 @@ impl AppState {
     }
 
     /// Eased progress (0..1) of the newest active animation of `kind`.
+    /// Returns 1.0 ("settled") when no animation of that kind is active.
     fn anim_progress(&self, kind: AnimKind) -> f64 {
-        self.anims
-            .iter()
-            .filter(|a| a.kind == kind)
-            .map(|a| {
-                let t = a.start.elapsed().as_secs_f64() / a.duration.as_secs_f64();
-                t.clamp(0.0, 1.0)
-            })
-            .fold(0.0, f64::max)
+        anim_progress_of(&self.anims, kind)
     }
 
     /// Fading pulse intensity (1 -> 0) for a FocusPulse/RefreshFlash on `focus`.
@@ -2231,6 +2225,26 @@ fn anim_duration_ms(p: &crate::config::AnimationPrefs, kind: AnimKind) -> u64 {
     (base as f64 * p.speed.clamp(0.1, 10.0)) as u64
 }
 
+/// Eased progress of the newest animation of `kind`: `max(t)` clamped to
+/// 0..1, or **1.0 ("settled")** when no animation of that kind is active —
+/// so callers render their final state instead of a blank/partial frame.
+fn anim_progress_of(anims: &[ActiveAnim], kind: AnimKind) -> f64 {
+    let mut found = false;
+    let mut best = 0.0f64;
+    for a in anims {
+        if a.kind == kind {
+            found = true;
+            let t = a.start.elapsed().as_secs_f64() / a.duration.as_secs_f64();
+            best = best.max(t.clamp(0.0, 1.0));
+        }
+    }
+    if found {
+        best
+    } else {
+        1.0
+    }
+}
+
 /// Build the status-bar text: `◆ branch @ short_sha  ↑ remote  (+a/-b)`.
 fn status_line(branch: &str, head_short: &str, remote: Option<&str>, ahead: usize, behind: usize) -> String {
     let mut line = format!("◆ {}", if branch.is_empty() { "HEAD" } else { branch });
@@ -2398,7 +2412,12 @@ fn render_detail(f: &mut Frame, state: &mut AppState, area: Rect) {
     // Wipe-in: clip the content to a growing height during a PanelTransition.
     let panel_t = state.anim_progress(AnimKind::PanelTransition);
     let grow = ease_out(panel_t);
-    let content_area = Rect::new(area.x, area.y, area.width, (area.height as f64 * grow) as u16);
+    let content_area = Rect::new(
+        area.x,
+        area.y,
+        area.width,
+        ((area.height as f64 * grow) as u16).max(1),
+    );
     let block = Block::default()
         .title(state.detail_mode.title())
         .borders(Borders::ALL)
@@ -4663,5 +4682,34 @@ mod tests {
         assert_eq!(anim_duration_ms(&p, AnimKind::RefreshFlash), 150);
         let fast = crate::config::AnimationPrefs { speed: 2.0, ..crate::config::AnimationPrefs::default() };
         assert_eq!(anim_duration_ms(&fast, AnimKind::FocusPulse), 360);
+    }
+
+    #[test]
+    fn anim_progress_settles_to_one_when_idle() {
+        // No animation -> "settled" (1.0), so the Detail pane renders at full
+        // height and the overlay dim stays off instead of blanking/dimming.
+        assert_eq!(anim_progress_of(&[], AnimKind::PanelTransition), 1.0);
+        assert_eq!(anim_progress_of(&[], AnimKind::OverlayIn), 1.0);
+    }
+
+    #[test]
+    fn anim_progress_reports_flight_and_expired() {
+        let dur = Duration::from_millis(200);
+        let mid = ActiveAnim {
+            start: Instant::now() - Duration::from_millis(100),
+            duration: dur,
+            kind: AnimKind::PanelTransition,
+            focus: None,
+        };
+        let t = anim_progress_of(&[mid], AnimKind::PanelTransition);
+        assert!((t - 0.5).abs() < 0.05, "expected ~0.5, got {}", t);
+
+        let expired = ActiveAnim {
+            start: Instant::now() - Duration::from_millis(500),
+            duration: dur,
+            kind: AnimKind::PanelTransition,
+            focus: None,
+        };
+        assert_eq!(anim_progress_of(&[expired], AnimKind::PanelTransition), 1.0);
     }
 }

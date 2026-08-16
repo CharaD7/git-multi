@@ -87,6 +87,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   view switches wipe in; `enabled = false` renders everything instantly.
 
 ### Fixed
+- Detail pane no longer renders blank: animation progress now settles to 1.0
+  when no animation is running, so the pane draws at full height (and the
+  overlay background no longer stays dimmed) instead of being clipped to a
+  zero-height frame once a wipe/fade animation completes.
 - Auto-save no longer stages everything into the real index (`git add -A` was
   destroying the user's granular stage/unstage state every ~30s idle). The
   snapshot now uses a throwaway index; identical snapshots are skipped.

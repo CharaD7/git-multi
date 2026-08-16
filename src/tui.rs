@@ -448,6 +448,105 @@ struct ActiveAnim {
     focus: Option<Focus>,
 }
 
+/// A step in the ERP-style onboarding tutorial.
+struct TutorialStep {
+    title: &'static str,
+    body: &'static str,
+    keys: &'static str,
+}
+
+/// Position within the tutorial.
+struct TutorialState {
+    current: usize,
+}
+
+const TUTORIAL_STEPS: &[TutorialStep] = &[
+    TutorialStep {
+        title: "Welcome to git-multi",
+        body: "git-multi is a CLI + TUI for managing multiple Git remotes, syncing \
+               across origins, browsing remote branches, managing pull requests, and more. \
+               This quick tour shows what you can do and how.\n\n\
+               Press [Enter] for the next step, or [Space] to skip the tour.",
+        keys: "",
+    },
+    TutorialStep {
+        title: "Panes & focus",
+        body: "The playground has four panes — Remotes, Branches, Files and Detail — plus \
+               an interactive Git Graph. Focus cycles with [Tab] (or ←/→), move the \
+               selection with ↑/↓, and [Space] toggles branch multi-select.",
+        keys: "Tab · ↑/↓ · Space",
+    },
+    TutorialStep {
+        title: "Remotes",
+        body: "Manage remotes from one view: add (a), rename (R), remove (x), set default (D). \
+               Fetch (f), push (p) and pull (l) target the selected remote. Press [v] to browse \
+               a remote's branches and cherry-pick across origins.",
+        keys: "a R x D · f p l · v",
+    },
+    TutorialStep {
+        title: "Branches",
+        body: "Enter checks out a branch, [c] creates one, [m] renames, [x] deletes. The \
+               current branch is marked with ●, and multi-select with [Space] lets fetch/push \
+               target several branches at once.",
+        keys: "Enter · c m x · Space",
+    },
+    TutorialStep {
+        title: "Files & staging",
+        body: "The Files panel shows staged/unstaged changes per file. [S] toggles stage/\
+               unstage, [Enter] opens a file diff, [b] blames it, and [P] cherry-picks a \
+               commit onto HEAD. [X]/[V] run git rm / git mv.",
+        keys: "S · Enter · b · P · X V",
+    },
+    TutorialStep {
+        title: "Cherry-pick across origins",
+        body: "Press [v] in the Remotes pane to browse any remote/branch. Multi-select commits \
+               with [Space], toggle copy/no-commit (c), target branch (t) and push-after-apply \
+               (p), preview diffs (d), then [Enter] to apply — the source is fetched automatically.",
+        keys: "v · Space · c t p · d · Enter",
+    },
+    TutorialStep {
+        title: "Git Graph",
+        body: "Press [g] for the commit DAG with branch/tag/remote labels. [Enter] cherry-picks \
+               the selected commit, [D] previews its diff, [G] opens a full-screen graph, and \
+               [a] toggles all refs. The row at HEAD is highlighted.",
+        keys: "g · Enter · D · G · a",
+    },
+    TutorialStep {
+        title: "GitLens",
+        body: "Press [b] for per-line blame (author, commit, date), [H] for a file's history, \
+               [L] for a line's history, and [h] for the commit-activity heatmap.",
+        keys: "b · H · L · h",
+    },
+    TutorialStep {
+        title: "GitHub",
+        body: "Press [o] to browse pull requests — reviewers, milestone, assignees, changed \
+               files, commits — and merge/close/review/comment from the terminal. [N] lists \
+               contributors with profiles.",
+        keys: "o · N",
+    },
+    TutorialStep {
+        title: "Status & identity",
+        body: "The top bar shows your device + username (user@device) and GitHub username. The \
+               status bar shows the active branch (◆), the HEAD commit (@), the upstream remote \
+               (↑) and ahead/behind. Idle on a pane for ~10s and a floating tooltip shows the \
+               available shortcuts.",
+        keys: "? · Ctrl+P",
+    },
+    TutorialStep {
+        title: "Help & customization",
+        body: "Press [?] for the full cheatsheet or [Ctrl+P] to run any action by name. Idle \
+               tips, animations, the welcome screen and your identity are all configurable in \
+               .gitmulti/config.toml ([gui], [identity], [animations]).",
+        keys: "? · Ctrl+P · config.toml",
+    },
+    TutorialStep {
+        title: "You're all set",
+        body: "That's the tour. Explore the panes, try fetch/push/pull, cherry-pick across \
+               remotes, and open the cheatsheet any time with [?]. Happy multi-remote sync!",
+        keys: "",
+    },
+];
+
 /// A blocking git operation handed off to the background worker thread so the
 /// UI never freezes while fetch/push/pull/merge/commit run.
 enum UiJob {
@@ -605,6 +704,8 @@ struct AppState {
     anims: Vec<ActiveAnim>,
     prev_overlay_none: bool,
     prev_detail_mode: DetailMode,
+    // Onboarding tutorial
+    tutorial: Option<TutorialState>,
 }
 
 impl AppState {
@@ -692,10 +793,15 @@ impl AppState {
             anims: Vec::new(),
             prev_overlay_none: true,
             prev_detail_mode: DetailMode::Detail,
+            tutorial: None,
         };
         state.refresh();
         state.remote_state.select(Some(0));
         state.branch_state.select(Some(0));
+        // When the welcome is skipped entirely, start the tutorial immediately.
+        if !state.welcome {
+            state.maybe_start_tutorial();
+        }
         Ok(state)
     }
 
@@ -1067,6 +1173,14 @@ impl AppState {
             duration: Duration::from_millis(900),
         });
         self.transition_from_welcome = true;
+        self.maybe_start_tutorial();
+    }
+
+    /// Start the onboarding tutorial when enabled.
+    fn maybe_start_tutorial(&mut self) {
+        if self.repo.config.gui.show_tutorial {
+            self.tutorial = Some(TutorialState { current: 0 });
+        }
     }
 
     /// Activate the focused welcome button.
@@ -1935,8 +2049,8 @@ pub fn run_tui() -> io::Result<()> {
         }
         // Idle engine: show per-pane tips/hovers after `idle_tip_delay_secs`
         // without any keypress. Any keypress resets `last_activity`, so "idle"
-        // already implies "not navigating". Paused during welcome/transition.
-        let in_playground = !state.welcome && state.transition.is_none();
+        // already implies "not navigating". Paused during welcome/transition/tutorial.
+        let in_playground = !state.welcome && state.transition.is_none() && state.tutorial.is_none();
         if in_playground
             && state.gui.idle_tips
             && matches!(state.overlay, Overlay::None)
@@ -1982,6 +2096,7 @@ fn ui(f: &mut Frame, state: &mut AppState) {
         render_playground(f, state, f.area());
     }
     render_overlay(f, state);
+    render_tutorial(f, state);
 }
 
 /// The main playground: identity top bar, panes, status bar, help footer.
@@ -2059,6 +2174,95 @@ fn render_top_bar(f: &mut Frame, state: &AppState, area: Rect) {
     f.render_widget(p, area);
 }
 
+/// A 5x7 pixel glyph for a character ('.' = empty, '#' = filled). Used to render
+/// the username as a huge colored banner ("colorscript") on the welcome screen.
+fn glyph(c: char) -> Option<[&'static str; 7]> {
+    Some(match c.to_ascii_uppercase() {
+        'A' => [".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"],
+        'B' => ["####.", "#...#", "#...#", "####.", "#...#", "#...#", "####."],
+        'C' => [".###.", "#...#", "#....", "#....", "#....", "#...#", ".###."],
+        'D' => ["####.", "#...#", "#...#", "#...#", "#...#", "#...#", "####."],
+        'E' => ["#####", "#....", "#....", "####.", "#....", "#....", "#####"],
+        'F' => ["#####", "#....", "#....", "####.", "#....", "#....", "#...."],
+        'G' => [".###.", "#...#", "#....", "#.###", "#...#", "#...#", ".###."],
+        'H' => ["#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"],
+        'I' => ["#####", "..#..", "..#..", "..#..", "..#..", "..#..", "#####"],
+        'J' => ["..###", "...#.", "...#.", "...#.", "...#.", "#..#.", ".##.."],
+        'K' => ["#...#", "#..#.", "#.#..", "##...", "#.#..", "#..#.", "#...#"],
+        'L' => ["#....", "#....", "#....", "#....", "#....", "#....", "#####"],
+        'M' => ["#...#", "##.##", "#.#.#", "#.#.#", "#...#", "#...#", "#...#"],
+        'N' => ["#...#", "##..#", "#.#.#", "#..##", "#...#", "#...#", "#...#"],
+        'O' => [".###.", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."],
+        'P' => ["####.", "#...#", "#...#", "####.", "#....", "#....", "#...."],
+        'Q' => [".###.", "#...#", "#...#", "#...#", "#.#.#", "#..#.", ".##.#"],
+        'R' => ["####.", "#...#", "#...#", "####.", "#.#..", "#..#.", "#...#"],
+        'S' => [".####", "#....", "#....", ".###.", "....#", "....#", "####."],
+        'T' => ["#####", "..#..", "..#..", "..#..", "..#..", "..#..", "..#.."],
+        'U' => ["#...#", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."],
+        'V' => ["#...#", "#...#", "#...#", "#...#", "#...#", ".#.#.", "..#.."],
+        'W' => ["#...#", "#...#", "#...#", "#.#.#", "#.#.#", "##.##", "#...#"],
+        'X' => ["#...#", "#...#", ".#.#.", "..#..", ".#.#.", "#...#", "#...#"],
+        'Y' => ["#...#", "#...#", ".#.#.", "..#..", "..#..", "..#..", "..#.."],
+        'Z' => ["#####", "....#", "...#.", "..#..", ".#...", "#....", "#####"],
+        '0' => [".###.", "#...#", "#..##", "#.#.#", "##..#", "#...#", ".###."],
+        '1' => ["..#..", ".##..", "..#..", "..#..", "..#..", "..#..", ".###."],
+        '2' => [".###.", "#...#", "....#", "...#.", "..#..", ".#...", "#####"],
+        '3' => [".###.", "#...#", "....#", "..##.", "....#", "#...#", ".###."],
+        '4' => ["...#.", "..##.", ".#.#.", "#..#.", "#####", "...#.", "...#."],
+        '5' => ["#####", "#....", "#....", "####.", "....#", "....#", "####."],
+        '6' => [".###.", "#....", "#....", "####.", "#...#", "#...#", ".###."],
+        '7' => ["#####", "....#", "...#.", "..#..", ".#...", ".#...", ".#..."],
+        '8' => [".###.", "#...#", "#...#", ".###.", "#...#", "#...#", ".###."],
+        '9' => [".###.", "#...#", "#...#", ".####", "....#", "#...#", ".###."],
+        '@' => [".###.", "#...#", "#..##", "#.#.#", "#.#.#", "#....", ".###."],
+        '-' => [".....", ".....", ".....", "#####", ".....", ".....", "....."],
+        '_' => [".....", ".....", ".....", ".....", ".....", ".....", "#####"],
+        '.' => [".....", ".....", ".....", ".....", ".....", "..##.", "..##."],
+        _ => return None,
+    })
+}
+
+/// Fallback glyph for unknown characters (a filled 5x7 block).
+const GLYPH_BLOCK: [&str; 7] = [
+    "#####", "#####", "#####", "#####", "#####", "#####", "#####",
+];
+
+/// Build a centered colored banner (7 rows) for `text`, truncating to fit
+/// `max_cols` (each glyph is 5 columns + a 1-column gap).
+fn banner_build(text: &str, max_cols: usize) -> Vec<String> {
+    let per = 6usize;
+    let max_chars = max_cols.saturating_add(1) / per;
+    let shown: String = text.chars().take(max_chars).collect();
+    let mut rows = vec![String::new(); 7];
+    for (ci, ch) in shown.chars().enumerate() {
+        let g = glyph(ch).unwrap_or(GLYPH_BLOCK);
+        for r in 0..7 {
+            if ci > 0 {
+                rows[r].push(' ');
+            }
+            rows[r].push_str(
+                &g[r]
+                    .chars()
+                    .map(|c| if c == '#' { '█' } else { ' ' })
+                    .collect::<String>(),
+            );
+        }
+    }
+    rows.into_iter().map(|r| r.trim_end().to_string()).collect()
+}
+
+/// Scale an RGB color's brightness by `glow` (0..1) for the banner pulse.
+fn banner_color(base: Color, glow: f64) -> Color {
+    match base {
+        Color::Rgb(r, g, b) => Color::Rgb(
+            (r as f64 * glow) as u8,
+            (g as f64 * glow) as u8,
+            (b as f64 * glow) as u8,
+        ),
+        other => other,
+    }
+}
+
 const WELCOME_BUTTONS: [&str; 5] = [
     "Continue →",
     "Skip intro",
@@ -2103,18 +2307,64 @@ fn render_welcome(f: &mut Frame, state: &AppState, area: Rect) {
     let identity = format!("{}  ·  {}", host, who);
     let github_line = format!("github: {}", gh);
 
-    // Assemble centered content.
+    // Assemble centered content as styled lines.
     let wrapped = wrap_text(&blurb, inner_w);
-    let mut rows: Vec<String> = vec![
-        center_pad("git-multi", inner_w),
-        center_pad(&identity, inner_w),
-        center_pad(&github_line, inner_w),
-        String::new(),
-    ];
-    for l in &wrapped {
-        rows.push(center_pad(l, inner_w));
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // Huge username banner ("colorscript"), if enabled.
+    let gui = &state.repo.config.gui;
+    if gui.username_banner {
+        let name = state
+            .gh_user
+            .clone()
+            .or_else(|| {
+                if state.username.is_empty() {
+                    None
+                } else {
+                    Some(state.username.clone())
+                }
+            })
+            .unwrap_or_else(|| "GUEST".to_string());
+        let anims_on = state.repo.config.animations.enabled;
+        let shown: String = match gui.banner_effect.as_str() {
+            "grow-letters" if anims_on => {
+                let per = 140usize;
+                let n = (elapsed / per).min(name.chars().count());
+                name.chars().take(n).collect()
+            }
+            _ => name.clone(),
+        };
+        let banner = banner_build(&shown, inner_w);
+        let glow = if gui.banner_effect == "glow" && anims_on {
+            0.55 + 0.45 * ((elapsed as f64 / 600.0 * std::f64::consts::TAU).sin() + 1.0) / 2.0
+        } else {
+            1.0
+        };
+        let col = banner_color(VIBRANT_PINK, glow);
+        for row in banner {
+            lines.push(Line::from(Span::styled(
+                center_pad(&row, inner_w),
+                Style::default().fg(col).add_modifier(Modifier::BOLD),
+            )));
+        }
+        lines.push(Line::from(""));
     }
-    rows.push(String::new());
+
+    let title_style = Style::default().fg(title_fg).add_modifier(Modifier::BOLD);
+    lines.push(Line::from(Span::styled(center_pad("git-multi", inner_w), title_style)));
+    lines.push(Line::from(Span::styled(
+        center_pad(&identity, inner_w),
+        Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        center_pad(&github_line, inner_w),
+        Style::default().fg(GRAY),
+    )));
+    lines.push(Line::from(""));
+    for l in &wrapped {
+        lines.push(Line::from(Span::styled(center_pad(l, inner_w), Style::default().fg(CREAM))));
+    }
+    lines.push(Line::from(""));
 
     // Button row: the focused button is highlighted.
     let btn_total: usize = WELCOME_BUTTONS.iter().map(|b| b.chars().count()).sum::<usize>()
@@ -2131,30 +2381,83 @@ fn render_welcome(f: &mut Frame, state: &AppState, area: Rect) {
             btn_text.push_str(b);
         }
     }
-    rows.push(center_pad(&btn_text, inner_w));
-    rows.push(String::new());
-    rows.push(center_pad("Enter: activate · Tab/↑↓: move · ?: cheatsheet · Ctrl+P: palette · q: skip intro", inner_w));
+    lines.push(Line::from(Span::styled(
+        center_pad(&btn_text, inner_w),
+        Style::default().fg(if state.welcome_button < 2 { YELLOW } else { CREAM }),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        center_pad("Enter: activate · Tab/↑↓: move · ?: cheatsheet · Ctrl+P: palette · q: skip intro", inner_w),
+        Style::default().fg(GRAY),
+    )));
 
     // Vertical centering.
     let avail = (area.height as usize).saturating_sub(2);
-    let top_pad = if rows.len() < avail { (avail - rows.len()) / 2 } else { 0 };
-
-    let mut text = String::new();
+    let top_pad = if lines.len() < avail { (avail - lines.len()) / 2 } else { 0 };
+    let mut padded = Vec::new();
     for _ in 0..top_pad {
-        text.push('\n');
+        padded.push(Line::from(""));
     }
-    for l in &rows {
-        text.push_str(l);
-        text.push('\n');
-    }
+    padded.extend(lines);
 
     let block = Block::default()
         .title(" git-multi — multi-remote Git control center ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(title_fg));
-    let p = Paragraph::new(text)
+    let p = Paragraph::new(padded)
         .block(block)
         .style(Style::default().fg(CREAM));
+    f.render_widget(ratatui::widgets::Clear, area);
+    f.render_widget(p, area);
+}
+
+/// Render the ERP-style onboarding tutorial as a dimmed modal over the playground.
+fn render_tutorial(f: &mut Frame, state: &AppState) {
+    let Some(ts) = &state.tutorial else { return };
+    let n = TUTORIAL_STEPS.len();
+    let idx = ts.current.min(n.saturating_sub(1));
+    let step = &TUTORIAL_STEPS[idx];
+
+    let inner_w = (f.area().width.saturating_sub(10)) as usize;
+    let mut text = String::new();
+    for l in wrap_text(step.body, inner_w) {
+        text.push_str(&l);
+        text.push('\n');
+    }
+    if !step.keys.is_empty() {
+        text.push('\n');
+        text.push_str(&format!("Keys: {}", step.keys));
+        text.push('\n');
+    }
+    text.push('\n');
+    let bar_w = 20usize;
+    let filled = (bar_w as f64 * (idx + 1) as f64 / n as f64).round() as usize;
+    let bar = format!(
+        "{}{}",
+        "█".repeat(filled),
+        "░".repeat(bar_w.saturating_sub(filled))
+    );
+    text.push_str(&format!("Step {}/{}  {}\n", idx + 1, n, bar));
+    text.push_str("[Enter] next · [Space] skip tour");
+
+    let full = f.area();
+    let buf = f.buffer_mut();
+    for x in full.left()..full.right() {
+        for y in full.top()..full.bottom() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.bg = blend_color(cell.bg, Color::Rgb(10, 10, 20), 0.45);
+            }
+        }
+    }
+    let area = centered_rect(80, 16, full);
+    let block = Block::default()
+        .title(format!(" {} ", step.title))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(VIBRANT_PINK));
+    let p = Paragraph::new(text)
+        .block(block)
+        .style(Style::default().fg(CREAM).bg(Color::Rgb(25, 25, 38)))
+        .wrap(Wrap { trim: false });
     f.render_widget(ratatui::widgets::Clear, area);
     f.render_widget(p, area);
 }
@@ -3500,6 +3803,10 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
                 if handle_overlay(state, key) {
                     return Ok(false);
                 }
+                if state.tutorial.is_some() {
+                    handle_tutorial_key(state, &key);
+                    return Ok(false);
+                }
                 if state.welcome {
                     handle_welcome_key(state, &key);
                     return Ok(false);
@@ -3514,6 +3821,24 @@ fn handle_events(state: &mut AppState) -> io::Result<bool> {
         }
     }
     Ok(false)
+}
+
+/// Key handling for the onboarding tutorial: Enter advances, Space/Esc/q skips.
+fn handle_tutorial_key(state: &mut AppState, key: &crossterm::event::KeyEvent) {
+    let Some(k) = parse_key(key) else { return };
+    match k {
+        Key::Enter => {
+            if let Some(ts) = &mut state.tutorial {
+                if ts.current + 1 < TUTORIAL_STEPS.len() {
+                    ts.current += 1;
+                } else {
+                    state.tutorial = None;
+                }
+            }
+        }
+        Key::Char(' ') | Key::Esc | Key::Char('q') => state.tutorial = None,
+        _ => {}
+    }
 }
 
 /// Key handling for the welcome screen (buttons + direct shortcuts).
@@ -4711,5 +5036,39 @@ mod tests {
             focus: None,
         };
         assert_eq!(anim_progress_of(&[expired], AnimKind::PanelTransition), 1.0);
+    }
+
+    #[test]
+    fn banner_build_renders_and_truncates() {
+        // Seven rows per banner.
+        let rows = banner_build("AB", 100);
+        assert_eq!(rows.len(), 7);
+        assert!(rows.iter().all(|r| r.contains('█')));
+        // More characters -> a longer first row.
+        let one = banner_build("A", 100);
+        assert!(rows[0].chars().count() > one[0].chars().count());
+        // Truncation: a 6-col area fits exactly one 5-col glyph.
+        let narrow = banner_build("ABC", 6);
+        assert_eq!(narrow[0].chars().count(), one[0].chars().count());
+    }
+
+    #[test]
+    fn glyph_known_and_unknown() {
+        assert!(glyph('a').is_some()); // case-insensitive
+        assert!(glyph('9').is_some());
+        assert!(glyph('!').is_none());
+    }
+
+    #[test]
+    fn banner_color_scales_brightness() {
+        assert_eq!(banner_color(Color::Rgb(255, 105, 180), 0.5), Color::Rgb(127, 52, 90));
+        assert_eq!(banner_color(Color::Rgb(100, 100, 100), 1.0), Color::Rgb(100, 100, 100));
+    }
+
+    #[test]
+    fn tutorial_has_steps() {
+        assert_eq!(TUTORIAL_STEPS.len(), 12);
+        assert_eq!(TUTORIAL_STEPS[0].title, "Welcome to git-multi");
+        assert_eq!(TUTORIAL_STEPS.last().unwrap().title, "You're all set");
     }
 }

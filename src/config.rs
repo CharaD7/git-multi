@@ -150,6 +150,15 @@ pub struct GuiPreferences {
     /// Show the animated welcome screen on launch.
     #[serde(default = "default_true")]
     pub show_welcome: bool,
+    /// Show the ERP-style tutorial modals after the welcome screen.
+    #[serde(default = "default_true")]
+    pub show_tutorial: bool,
+    /// Render the GitHub username as a huge colored banner on the welcome.
+    #[serde(default = "default_true")]
+    pub username_banner: bool,
+    /// Welcome banner effect: "glow", "grow-letters", or "none".
+    #[serde(default = "default_banner_effect")]
+    pub banner_effect: String,
 }
 
 impl Default for GuiPreferences {
@@ -162,8 +171,15 @@ impl Default for GuiPreferences {
             contributors_fallback: "shortlog".to_string(),
             pr_default_state: "open".to_string(),
             show_welcome: true,
+            show_tutorial: true,
+            username_banner: true,
+            banner_effect: default_banner_effect(),
         }
     }
+}
+
+fn default_banner_effect() -> String {
+    "glow".to_string()
 }
 
 fn default_true() -> bool {
@@ -438,5 +454,17 @@ mod tests {
         assert_eq!(a.overlay_ms, 350);
         assert_eq!(a.focus_ms, 180); // default
         assert!((a.speed - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn gui_new_keys_default() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.gui.show_tutorial);
+        assert!(cfg.gui.username_banner);
+        assert_eq!(cfg.gui.banner_effect, "glow");
+        let parsed: Config = toml::from_str("[gui]\nshow_tutorial = false\nusername_banner = false\nbanner_effect = \"grow-letters\"\n").unwrap();
+        assert!(!parsed.gui.show_tutorial);
+        assert!(!parsed.gui.username_banner);
+        assert_eq!(parsed.gui.banner_effect, "grow-letters");
     }
 }

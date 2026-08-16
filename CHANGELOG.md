@@ -85,6 +85,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`overlay`/`focus`/`panel`/`refresh`). When enabled, modals fade/slide in,
   focus changes and pane refreshes pulse the pane border, and Detail panel
   view switches wipe in; `enabled = false` renders everything instantly.
+- Welcome-screen username banner: your GitHub username (falling back to the
+  system username) is rendered as a huge 5x7 block-text banner with a `glow`
+  pulse, `grow-letters` reveal, or static color — configurable via
+  `[gui] username_banner` / `[gui] banner_effect`.
+- ERP-style onboarding tour: after the welcome screen, modals introduce the
+  panes and features step by step (`[Enter]` next, `[Space]` skip). Toggle via
+  `[gui] show_tutorial`.
 
 ### Fixed
 - Detail pane no longer renders blank: animation progress now settles to 1.0

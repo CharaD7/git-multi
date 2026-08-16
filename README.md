@@ -61,10 +61,12 @@ Launch the terminal user interface:
 git-multi --gui
 ```
 On launch you get an animated **welcome screen** showing your machine hostname and
-GitHub username, with navigable buttons — Continue, Skip intro, `?` cheatsheet,
-`Ctrl+P` palette, and "Don't show again" (persisted to `[gui] show_welcome`). The
-playground then bounces in; your hostname and GitHub username stay visible in the
-bold top bar.
+GitHub username (with your username as a huge glowing/growing **block-text banner**),
+plus navigable buttons — Continue, Skip intro, `?` cheatsheet, `Ctrl+P` palette, and
+"Don't show again" (persisted to `[gui] show_welcome`). The playground then bounces in;
+your hostname and GitHub username stay visible in the bold top bar. An **onboarding
+tour** then walks you through the panes and features — `[Enter]` for the next dialog,
+`[Space]` to skip (toggle via `[gui] show_tutorial`).
 
 The GUI is a five-panel terminal UI: **Remotes | Branches | Files | Detail | Log**, with an
 interactive **Git Graph** mode. The remote, branch, and file lists auto-refresh on demand
@@ -379,6 +381,11 @@ The welcome screen and the playground's top bar show your **device name** (from 
 device = "MyPC"      # override the auto-detected host name
 username = "alice"   # override the auto-detected system user
 ```
+
+Welcome-screen extras are configurable via `[gui]`: `username_banner` renders your
+GitHub username as a huge block-text banner on the welcome screen, `banner_effect`
+selects the effect (`glow`, `grow-letters`, or `none`), and `show_tutorial` toggles
+the onboarding tour after the welcome (`[Enter]` next, `[Space]` skip).
 
 Rendering animations are configurable via `[animations]` (set `enabled = false`
 for reduced motion; tune the global `speed`, the overlay fade `dim`, and each

@@ -140,7 +140,7 @@ fn cmd_init() -> Result<()> {
 
 fn cmd_remote(command: &RemoteCommands, json: bool) -> Result<()> {
     match command {
-        RemoteCommands::Add { name, url, default } => {
+        RemoteCommands::Add { name, url, default, check, no_check, create } => {
             let mut repo = GitRepo::open()?;
             repo.add_remote(name, url)?;
             
@@ -152,6 +152,75 @@ fn cmd_remote(command: &RemoteCommands, json: bool) -> Result<()> {
             println!("Added remote '{}' with URL: {}", style(name).green(), url);
             if *default {
                 println!("Set as default remote");
+            }
+
+            // Reachability check (default from config unless overridden).
+            let want_check = if *check {
+                true
+            } else if *no_check {
+                false
+            } else {
+                repo.config.sync_preferences.verify_remotes_on_add
+            };
+            if want_check {
+                let mut check = repo.remote_reachable(url);
+                // --create: try to create the GitHub repo, then re-check.
+                if !check.reachable && *create {
+                    if let Some(slug) = crate::git::repo_slug_from_url(url) {
+                        println!("{}", style(format!("Creating GitHub repo '{}' …", slug)).yellow());
+                        let _ = crate::git::run_captured(
+                            "gh",
+                            &["repo", "create", &slug, "--private", "--source", ".", "--push"],
+                            repo.workdir_public(),
+                            &[],
+                            std::time::Duration::from_secs(60),
+                        );
+                        check = repo.remote_reachable(url);
+                    }
+                }
+                if check.reachable {
+                    println!("{}", style(format!("Remote '{}' is reachable.", name)).green());
+                } else {
+                    eprintln!(
+                        "{}",
+                        style(format!(
+                            "Warning: remote '{}' could not be reached ({}). The remote repository may not exist yet — create it first (e.g. `gh repo create ...`) then run `git-multi fetch {}`.",
+                            name,
+                            if check.detail.is_empty() { "unknown error".to_string() } else { check.detail },
+                            name
+                        ))
+                        .yellow()
+                    );
+                }
+            }
+            Ok(())
+        }
+        RemoteCommands::Check { name } => {
+            let repo = GitRepo::open()?;
+            let names = match name {
+                Some(n) => vec![n.clone()],
+                None => repo.list_remotes()?,
+            };
+            let mut any_failed = false;
+            for n in &names {
+                let remote = repo.repo.find_remote(n).map_err(|_| GitMultiError::RemoteNotFound(n.clone()))?;
+                let url = remote.url().unwrap_or("unknown").to_string();
+                let check = repo.remote_reachable(&url);
+                if check.reachable {
+                    println!("{}  {}  {}", style(n).cyan(), style("reachable").green(), url);
+                } else {
+                    any_failed = true;
+                    eprintln!(
+                        "{}  {}  {}  ({})",
+                        style(n).cyan(),
+                        style("unreachable").red(),
+                        url,
+                        if check.detail.is_empty() { "repo may not exist".to_string() } else { check.detail }
+                    );
+                }
+            }
+            if any_failed {
+                std::process::exit(1);
             }
             Ok(())
         }

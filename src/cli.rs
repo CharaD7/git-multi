@@ -398,6 +398,26 @@ pub enum RemoteCommands {
         /// Set as default remote
         #[arg(short, long)]
         default: bool,
+
+        /// Probe the URL with git ls-remote and warn if it can't be reached
+        /// (defaults to [sync_preferences] verify_remotes_on_add)
+        #[arg(long)]
+        check: bool,
+
+        /// Skip the reachability check
+        #[arg(long)]
+        no_check: bool,
+
+        /// Auto-create the GitHub repository (gh repo create) when missing
+        #[arg(long)]
+        create: bool,
+    },
+
+    /// Check whether one (or all) remotes are reachable
+    Check {
+        /// Remote name (all remotes when omitted)
+        #[arg(value_name = "NAME")]
+        name: Option<String>,
     },
 
     /// Remove a remote

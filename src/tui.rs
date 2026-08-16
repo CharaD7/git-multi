@@ -561,6 +561,7 @@ enum UiJob {
     Revert { spec: String },
     Reset { mode: ResetMode, spec: String },
     AddRemote { name: String, url: String },
+    CheckRemote { name: String, url: String },
     RenameRemote { old: String, new: String },
     RemoveRemote { name: String },
     DeleteBranch { name: String },
@@ -1716,6 +1717,18 @@ fn handle_job(repo: &mut crate::git::GitRepo, job: UiJob) -> JobResult {
             Ok(()) => result(format!("Added remote '{}'", name), true),
             Err(e) => result_err(format!("Error: {}", e)),
         },
+        UiJob::CheckRemote { name, url } => {
+            let check = repo.remote_reachable(&url);
+            if check.reachable {
+                result(format!("Remote '{}' is reachable", name), false)
+            } else {
+                result_err(format!(
+                    "Warning: remote '{}' could not be reached ({}) — the repository may not exist yet. Create it first, then fetch.",
+                    name,
+                    if check.detail.is_empty() { "unknown error".to_string() } else { check.detail }
+                ))
+            }
+        }
         UiJob::RenameRemote { old, new } => match repo.rename_remote(&old, &new) {
             Ok(()) => result(format!("Renamed remote '{}' -> '{}'", old, new), true),
             Err(e) => result_err(format!("Error: {}", e)),
@@ -2174,81 +2187,24 @@ fn render_top_bar(f: &mut Frame, state: &AppState, area: Rect) {
     f.render_widget(p, area);
 }
 
-/// A 5x7 pixel glyph for a character ('.' = empty, '#' = filled). Used to render
-/// the username as a huge colored banner ("colorscript") on the welcome screen.
-fn glyph(c: char) -> Option<[&'static str; 7]> {
-    Some(match c.to_ascii_uppercase() {
-        'A' => [".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"],
-        'B' => ["####.", "#...#", "#...#", "####.", "#...#", "#...#", "####."],
-        'C' => [".###.", "#...#", "#....", "#....", "#....", "#...#", ".###."],
-        'D' => ["####.", "#...#", "#...#", "#...#", "#...#", "#...#", "####."],
-        'E' => ["#####", "#....", "#....", "####.", "#....", "#....", "#####"],
-        'F' => ["#####", "#....", "#....", "####.", "#....", "#....", "#...."],
-        'G' => [".###.", "#...#", "#....", "#.###", "#...#", "#...#", ".###."],
-        'H' => ["#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"],
-        'I' => ["#####", "..#..", "..#..", "..#..", "..#..", "..#..", "#####"],
-        'J' => ["..###", "...#.", "...#.", "...#.", "...#.", "#..#.", ".##.."],
-        'K' => ["#...#", "#..#.", "#.#..", "##...", "#.#..", "#..#.", "#...#"],
-        'L' => ["#....", "#....", "#....", "#....", "#....", "#....", "#####"],
-        'M' => ["#...#", "##.##", "#.#.#", "#.#.#", "#...#", "#...#", "#...#"],
-        'N' => ["#...#", "##..#", "#.#.#", "#..##", "#...#", "#...#", "#...#"],
-        'O' => [".###.", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."],
-        'P' => ["####.", "#...#", "#...#", "####.", "#....", "#....", "#...."],
-        'Q' => [".###.", "#...#", "#...#", "#...#", "#.#.#", "#..#.", ".##.#"],
-        'R' => ["####.", "#...#", "#...#", "####.", "#.#..", "#..#.", "#...#"],
-        'S' => [".####", "#....", "#....", ".###.", "....#", "....#", "####."],
-        'T' => ["#####", "..#..", "..#..", "..#..", "..#..", "..#..", "..#.."],
-        'U' => ["#...#", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."],
-        'V' => ["#...#", "#...#", "#...#", "#...#", "#...#", ".#.#.", "..#.."],
-        'W' => ["#...#", "#...#", "#...#", "#.#.#", "#.#.#", "##.##", "#...#"],
-        'X' => ["#...#", "#...#", ".#.#.", "..#..", ".#.#.", "#...#", "#...#"],
-        'Y' => ["#...#", "#...#", ".#.#.", "..#..", "..#..", "..#..", "..#.."],
-        'Z' => ["#####", "....#", "...#.", "..#..", ".#...", "#....", "#####"],
-        '0' => [".###.", "#...#", "#..##", "#.#.#", "##..#", "#...#", ".###."],
-        '1' => ["..#..", ".##..", "..#..", "..#..", "..#..", "..#..", ".###."],
-        '2' => [".###.", "#...#", "....#", "...#.", "..#..", ".#...", "#####"],
-        '3' => [".###.", "#...#", "....#", "..##.", "....#", "#...#", ".###."],
-        '4' => ["...#.", "..##.", ".#.#.", "#..#.", "#####", "...#.", "...#."],
-        '5' => ["#####", "#....", "#....", "####.", "....#", "....#", "####."],
-        '6' => [".###.", "#....", "#....", "####.", "#...#", "#...#", ".###."],
-        '7' => ["#####", "....#", "...#.", "..#..", ".#...", ".#...", ".#..."],
-        '8' => [".###.", "#...#", "#...#", ".###.", "#...#", "#...#", ".###."],
-        '9' => [".###.", "#...#", "#...#", ".####", "....#", "#...#", ".###."],
-        '@' => [".###.", "#...#", "#..##", "#.#.#", "#.#.#", "#....", ".###."],
-        '-' => [".....", ".....", ".....", "#####", ".....", ".....", "....."],
-        '_' => [".....", ".....", ".....", ".....", ".....", ".....", "#####"],
-        '.' => [".....", ".....", ".....", ".....", ".....", "..##.", "..##."],
-        _ => return None,
-    })
-}
-
-/// Fallback glyph for unknown characters (a filled 5x7 block).
-const GLYPH_BLOCK: [&str; 7] = [
-    "#####", "#####", "#####", "#####", "#####", "#####", "#####",
-];
-
-/// Build a centered colored banner (7 rows) for `text`, truncating to fit
-/// `max_cols` (each glyph is 5 columns + a 1-column gap).
+/// Build a centered ASCII banner (figlet Standard font) for `text`, truncating
+/// to fit `max_cols` (~7 columns per glyph). Returns the banner lines.
 fn banner_build(text: &str, max_cols: usize) -> Vec<String> {
-    let per = 6usize;
+    let per = 7usize;
     let max_chars = max_cols.saturating_add(1) / per;
-    let shown: String = text.chars().take(max_chars).collect();
-    let mut rows = vec![String::new(); 7];
-    for (ci, ch) in shown.chars().enumerate() {
-        let g = glyph(ch).unwrap_or(GLYPH_BLOCK);
-        for r in 0..7 {
-            if ci > 0 {
-                rows[r].push(' ');
-            }
-            rows[r].push_str(
-                &g[r]
-                    .chars()
-                    .map(|c| if c == '#' { '█' } else { ' ' })
-                    .collect::<String>(),
-            );
-        }
-    }
-    rows.into_iter().map(|r| r.trim_end().to_string()).collect()
+    let shown: String = text.chars().take(max_chars.max(1)).collect();
+    let font = match figlet_rs::FIGfont::standard() {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    let Some(figure) = font.convert(&shown) else {
+        return Vec::new();
+    };
+    let art = figure.to_string();
+    art.lines()
+        .map(|l| l.trim_end().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
 }
 
 /// Scale an RGB color's brightness by `glow` (0..1) for the banner pulse.
@@ -2336,7 +2292,7 @@ fn render_welcome(f: &mut Frame, state: &AppState, area: Rect) {
         };
         let banner = banner_build(&shown, inner_w);
         let glow = if gui.banner_effect == "glow" && anims_on {
-            0.55 + 0.45 * ((elapsed as f64 / 600.0 * std::f64::consts::TAU).sin() + 1.0) / 2.0
+            0.72 + 0.28 * ((elapsed as f64 / 600.0 * std::f64::consts::TAU).sin() + 1.0) / 2.0
         } else {
             1.0
         };
@@ -3910,7 +3866,10 @@ fn handle_overlay(state: &mut AppState, key: crossterm::event::KeyEvent) -> bool
                     let url = value.trim().to_string();
                     if !url.is_empty() {
                         let nm = name.clone();
-                        state.submit_job(UiJob::AddRemote { name: nm.clone(), url }, false);
+                        state.submit_job(UiJob::AddRemote { name: nm.clone(), url: url.clone() }, false);
+                        if state.repo.config.sync_preferences.verify_remotes_on_add {
+                            state.submit_job(UiJob::CheckRemote { name: nm.clone(), url }, false);
+                        }
                         state.log(format!("Adding remote '{}' ...", nm));
                         state.overlay = Overlay::None;
                     }
@@ -5040,23 +4999,16 @@ mod tests {
 
     #[test]
     fn banner_build_renders_and_truncates() {
-        // Seven rows per banner.
+        // Figlet renders multiple non-empty lines for a name.
         let rows = banner_build("AB", 100);
-        assert_eq!(rows.len(), 7);
-        assert!(rows.iter().all(|r| r.contains('█')));
-        // More characters -> a longer first row.
+        assert!(!rows.is_empty());
+        assert!(rows.iter().all(|r| !r.is_empty()));
+        // More characters -> a wider first row.
         let one = banner_build("A", 100);
         assert!(rows[0].chars().count() > one[0].chars().count());
-        // Truncation: a 6-col area fits exactly one 5-col glyph.
-        let narrow = banner_build("ABC", 6);
-        assert_eq!(narrow[0].chars().count(), one[0].chars().count());
-    }
-
-    #[test]
-    fn glyph_known_and_unknown() {
-        assert!(glyph('a').is_some()); // case-insensitive
-        assert!(glyph('9').is_some());
-        assert!(glyph('!').is_none());
+        // Truncation: a narrow area renders fewer columns than a wide one.
+        let narrow = banner_build("ABCDEFGH", 8);
+        assert!(narrow[0].chars().count() < rows[0].chars().count());
     }
 
     #[test]

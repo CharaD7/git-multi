@@ -383,9 +383,15 @@ username = "alice"   # override the auto-detected system user
 ```
 
 Welcome-screen extras are configurable via `[gui]`: `username_banner` renders your
-GitHub username as a huge block-text banner on the welcome screen, `banner_effect`
+GitHub username as a huge ASCII banner on the welcome screen, `banner_effect`
 selects the effect (`glow`, `grow-letters`, or `none`), and `show_tutorial` toggles
 the onboarding tour after the welcome (`[Enter]` next, `[Space]` skip).
+
+`git-multi remote add` probes new remotes with `git ls-remote` (via
+`[sync_preferences] verify_remotes_on_add`, default on) and warns when the URL
+can't be reached, so you know to create the remote repository first
+(`--no-check` skips; `--create` auto-creates GitHub repos via `gh`). Validate
+any remote with `git-multi remote check [name]`.
 
 Rendering animations are configurable via `[animations]` (set `enabled = false`
 for reduced motion; tune the global `speed`, the overlay fade `dim`, and each

@@ -211,6 +211,10 @@ pub struct SyncPreferences {
     pub auto_fetch: bool,
     #[serde(default)]
     pub auto_push: bool,
+    /// Probe new remotes with `git ls-remote` on `remote add` and warn when
+    /// the URL cannot be reached.
+    #[serde(default = "default_true")]
+    pub verify_remotes_on_add: bool,
 }
 
 impl Default for SyncPreferences {
@@ -219,6 +223,7 @@ impl Default for SyncPreferences {
             default_strategy: default_sync_strategy(),
             auto_fetch: true,
             auto_push: false,
+            verify_remotes_on_add: true,
         }
     }
 }
@@ -462,9 +467,11 @@ mod tests {
         assert!(cfg.gui.show_tutorial);
         assert!(cfg.gui.username_banner);
         assert_eq!(cfg.gui.banner_effect, "glow");
-        let parsed: Config = toml::from_str("[gui]\nshow_tutorial = false\nusername_banner = false\nbanner_effect = \"grow-letters\"\n").unwrap();
+        assert!(cfg.sync_preferences.verify_remotes_on_add);
+        let parsed: Config = toml::from_str("[gui]\nshow_tutorial = false\nusername_banner = false\nbanner_effect = \"grow-letters\"\n[sync_preferences]\nverify_remotes_on_add = false\n").unwrap();
         assert!(!parsed.gui.show_tutorial);
         assert!(!parsed.gui.username_banner);
         assert_eq!(parsed.gui.banner_effect, "grow-letters");
+        assert!(!parsed.sync_preferences.verify_remotes_on_add);
     }
 }

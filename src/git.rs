@@ -51,6 +51,30 @@ impl GitRepo {
         Ok(())
     }
 
+    /// Probe whether a remote URL is reachable (`git ls-remote`), so users can
+    /// be warned that a remote repository may not exist yet. Uses the
+    /// timeout/no-prompt network helpers so it can never hang the UI.
+    pub fn remote_reachable(&self, url: &str) -> RemoteCheck {
+        let workdir = self.workdir();
+        // Plain `git ls-remote <url>` exits 0 for both populated and empty
+        // (but reachable) repositories, and non-zero when the repo does not
+        // exist or cannot be reached.
+        match git_run_net(workdir, &["ls-remote", url]) {
+            Ok(out) if out.status.success() => RemoteCheck {
+                reachable: true,
+                detail: String::new(),
+            },
+            Ok(out) => RemoteCheck {
+                reachable: false,
+                detail: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            },
+            Err(e) => RemoteCheck {
+                reachable: false,
+                detail: e.to_string(),
+            },
+        }
+    }
+
     /// Remove a remote from both git config and git-multi config
     pub fn remove_remote(&mut self, name: &str) -> Result<()> {
         // Remove from git config
@@ -2006,6 +2030,13 @@ pub struct BranchStatus {
     pub subject: String,
     pub ahead: usize,
     pub behind: usize,
+}
+
+/// Result of probing a remote URL with `git ls-remote`.
+#[derive(Debug, Clone)]
+pub struct RemoteCheck {
+    pub reachable: bool,
+    pub detail: String,
 }
 
 /// A line of blame output.

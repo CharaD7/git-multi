@@ -430,6 +430,24 @@ struct Transition {
     duration: Duration,
 }
 
+/// The kind of a rendering animation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnimKind {
+    OverlayIn,
+    FocusPulse,
+    PanelTransition,
+    RefreshFlash,
+}
+
+/// A single active rendering animation (finished ones are dropped each tick).
+struct ActiveAnim {
+    start: Instant,
+    duration: Duration,
+    kind: AnimKind,
+    /// The pane a FocusPulse/RefreshFlash applies to (None otherwise).
+    focus: Option<Focus>,
+}
+
 /// A blocking git operation handed off to the background worker thread so the
 /// UI never freezes while fetch/push/pull/merge/commit run.
 enum UiJob {
@@ -583,6 +601,10 @@ struct AppState {
     host: String,
     username: String,
     gh_user: Option<String>,
+    // Rendering animations
+    anims: Vec<ActiveAnim>,
+    prev_overlay_none: bool,
+    prev_detail_mode: DetailMode,
 }
 
 impl AppState {
@@ -667,6 +689,9 @@ impl AppState {
             host,
             username,
             gh_user,
+            anims: Vec::new(),
+            prev_overlay_none: true,
+            prev_detail_mode: DetailMode::Detail,
         };
         state.refresh();
         state.remote_state.select(Some(0));
@@ -681,6 +706,9 @@ impl AppState {
         let prev_file = self.file_state.selected();
         let prev_sel: HashMap<String, bool> =
             self.branches.iter().map(|(n, s)| (n.clone(), *s)).collect();
+        let prev_remote_n = self.remotes.len();
+        let prev_branch_n = self.branches.len();
+        let prev_file_n = self.files.len();
 
         if let Ok(list) = self.repo.list_remotes_with_urls() {
             self.remotes = list
@@ -749,6 +777,17 @@ impl AppState {
         }
         if self.pick_target.is_empty() {
             self.pick_target = self.current_branch.clone().unwrap_or_default();
+        }
+
+        // Pulse the panes whose data actually changed.
+        if self.remotes.len() != prev_remote_n {
+            self.push_anim(AnimKind::RefreshFlash, Some(Focus::Remotes));
+        }
+        if self.branches.len() != prev_branch_n {
+            self.push_anim(AnimKind::RefreshFlash, Some(Focus::Branches));
+        }
+        if self.files.len() != prev_file_n {
+            self.push_anim(AnimKind::RefreshFlash, Some(Focus::Files));
         }
     }
 
@@ -964,13 +1003,66 @@ impl AppState {
         self.quit = true;
     }
 
-    /// Poll interval: animate the welcome/transition smoothly, otherwise relax.
+    /// Poll interval: animate the welcome/transition or any active rendering
+    /// animation smoothly, otherwise relax.
     fn poll_delay(&self) -> Duration {
-        if self.welcome || self.transition.is_some() {
+        if self.welcome || self.transition.is_some() || !self.anims.is_empty() {
             Duration::from_millis(16)
         } else {
             Duration::from_millis(100)
         }
+    }
+
+    /// Register a rendering animation, honoring the `[animations]` prefs.
+    /// Returns whether an animation was actually started.
+    fn push_anim(&mut self, kind: AnimKind, focus: Option<Focus>) -> bool {
+        let p = &self.repo.config.animations;
+        let enabled = match kind {
+            AnimKind::OverlayIn => p.enabled && p.overlay,
+            AnimKind::FocusPulse => p.enabled && p.focus,
+            AnimKind::PanelTransition => p.enabled && p.panel,
+            AnimKind::RefreshFlash => p.enabled && p.refresh,
+        };
+        if !enabled {
+            return false;
+        }
+        let ms = anim_duration_ms(p, kind);
+        self.anims.push(ActiveAnim {
+            start: Instant::now(),
+            duration: Duration::from_millis(ms),
+            kind,
+            focus,
+        });
+        true
+    }
+
+    /// Eased progress (0..1) of the newest active animation of `kind`.
+    fn anim_progress(&self, kind: AnimKind) -> f64 {
+        self.anims
+            .iter()
+            .filter(|a| a.kind == kind)
+            .map(|a| {
+                let t = a.start.elapsed().as_secs_f64() / a.duration.as_secs_f64();
+                t.clamp(0.0, 1.0)
+            })
+            .fold(0.0, f64::max)
+    }
+
+    /// Fading pulse intensity (1 -> 0) for a FocusPulse/RefreshFlash on `focus`.
+    fn pulse_level(&self, kind: AnimKind, focus: Focus) -> f64 {
+        self.anims
+            .iter()
+            .filter(|a| a.kind == kind && a.focus == Some(focus))
+            .map(|a| {
+                let t = a.start.elapsed().as_secs_f64() / a.duration.as_secs_f64();
+                (1.0 - t.clamp(0.0, 1.0)).max(0.0)
+            })
+            .fold(0.0, f64::max)
+    }
+
+    /// Drop finished animations.
+    fn prune_anims(&mut self) {
+        self.anims.retain(|a| a.start.elapsed() < a.duration);
     }
 
     /// Leave the welcome screen and bounce into the playground.
@@ -1828,6 +1920,18 @@ pub fn run_tui() -> io::Result<()> {
         if handle_events(&mut state)? {
             break;
         }
+        // Rendering-animation bookkeeping.
+        state.prune_anims();
+        // Overlay open -> push an OverlayIn animation.
+        if state.prev_overlay_none && !matches!(state.overlay, Overlay::None) {
+            state.push_anim(AnimKind::OverlayIn, None);
+        }
+        state.prev_overlay_none = matches!(state.overlay, Overlay::None);
+        // Detail mode change -> push a PanelTransition animation.
+        if state.prev_detail_mode != state.detail_mode {
+            state.push_anim(AnimKind::PanelTransition, None);
+            state.prev_detail_mode = state.detail_mode;
+        }
         // Clear a finished transition so the playground renders normally.
         if let Some(tr) = state.transition.as_ref() {
             if tr.start.elapsed() >= tr.duration {
@@ -2110,6 +2214,23 @@ fn ease_out_bounce(t: f64) -> f64 {
     }
 }
 
+/// Cubic ease-out (0..1) for subtle slides/wipe-ins.
+fn ease_out(t: f64) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t)
+}
+
+/// Animation duration in ms for a kind, scaled by the global `speed`.
+fn anim_duration_ms(p: &crate::config::AnimationPrefs, kind: AnimKind) -> u64 {
+    let base = match kind {
+        AnimKind::OverlayIn => p.overlay_ms,
+        AnimKind::FocusPulse => p.focus_ms,
+        AnimKind::PanelTransition => p.panel_ms,
+        AnimKind::RefreshFlash => p.refresh_ms,
+    };
+    (base as f64 * p.speed.clamp(0.1, 10.0)) as u64
+}
+
 /// Build the status-bar text: `◆ branch @ short_sha  ↑ remote  (+a/-b)`.
 fn status_line(branch: &str, head_short: &str, remote: Option<&str>, ahead: usize, behind: usize) -> String {
     let mut line = format!("◆ {}", if branch.is_empty() { "HEAD" } else { branch });
@@ -2161,7 +2282,7 @@ fn render_remotes(f: &mut Frame, state: &mut AppState, area: Rect) {
         .collect();
     let title = if state.focus == Focus::Remotes { " Remotes (focused) " } else { " Remotes " };
     let list = List::new(items)
-        .block(Block::default().title(title).borders(Borders::ALL).border_style(border_style(state.focus == Focus::Remotes)))
+        .block(Block::default().title(title).borders(Borders::ALL).border_style(border_style(state, Focus::Remotes)))
         .highlight_style(Style::default().bg(CYAN).fg(Color::Black))
         .highlight_symbol(">> ");
     f.render_stateful_widget(list, area, &mut state.remote_state);
@@ -2209,7 +2330,7 @@ fn render_branches(f: &mut Frame, state: &mut AppState, area: Rect) {
         .title(format!("{} [{} selected]", title, sel_count))
         .title_bottom(" [c] Create  [m] Rename  [x] Delete  [Space] Toggle ")
         .borders(Borders::ALL)
-        .border_style(border_style(state.focus == Focus::Branches));
+        .border_style(border_style(state, Focus::Branches));
     let branch_list = List::new(branch_items)
         .block(block)
         .highlight_style(Style::default().bg(MAUVE).fg(Color::Black))
@@ -2265,7 +2386,7 @@ fn render_files(f: &mut Frame, state: &mut AppState, area: Rect) {
     let block = Block::default()
         .title(format!("{} [{}]", title, count))
         .borders(Borders::ALL)
-        .border_style(border_style(state.focus == Focus::Files));
+        .border_style(border_style(state, Focus::Files));
     let list = List::new(items)
         .block(block)
         .highlight_style(Style::default().bg(BLUE).fg(Color::Black))
@@ -2274,6 +2395,10 @@ fn render_files(f: &mut Frame, state: &mut AppState, area: Rect) {
 }
 
 fn render_detail(f: &mut Frame, state: &mut AppState, area: Rect) {
+    // Wipe-in: clip the content to a growing height during a PanelTransition.
+    let panel_t = state.anim_progress(AnimKind::PanelTransition);
+    let grow = ease_out(panel_t);
+    let content_area = Rect::new(area.x, area.y, area.width, (area.height as f64 * grow) as u16);
     let block = Block::default()
         .title(state.detail_mode.title())
         .borders(Borders::ALL)
@@ -2307,7 +2432,7 @@ fn render_detail(f: &mut Frame, state: &mut AppState, area: Rect) {
                 .style(Style::default().fg(CREAM))
                 .wrap(Wrap { trim: false })
                 .scroll((state.commit_detail_scroll, 0));
-            f.render_widget(p, area);
+            f.render_widget(p, content_area);
             return;
         }
     };
@@ -2316,7 +2441,7 @@ fn render_detail(f: &mut Frame, state: &mut AppState, area: Rect) {
         .style(Style::default().fg(CREAM))
         .wrap(Wrap { trim: false })
         .scroll((0, 0));
-    f.render_widget(p, area);
+    f.render_widget(p, content_area);
     if state.detail_mode == DetailMode::Graph {
         // Re-render graph as a list for selection highlight.
         let head = state.head_short.as_str();
@@ -2341,32 +2466,49 @@ fn render_detail(f: &mut Frame, state: &mut AppState, area: Rect) {
             .block(Block::default().title(state.detail_mode.title()).borders(Borders::ALL).border_style(Style::default().fg(MAUVE)))
             .highlight_style(Style::default().bg(ORANGE).fg(Color::Black))
             .highlight_symbol(">> ");
-        f.render_stateful_widget(list, area, &mut state.graph_state);
+        f.render_stateful_widget(list, content_area, &mut state.graph_state);
     }
 }
 
 fn render_overlay(f: &mut Frame, state: &AppState) {
+    // Overlay fade-in + slide-up (animated entry).
+    let t = state.anim_progress(AnimKind::OverlayIn);
+    let fade = ease_out(t);
+    let dim_target = state.repo.config.animations.dim;
+    let dim = dim_target * (1.0 - fade);
+    let slide = ((1.0 - fade) * 8.0) as i16;
+    if dim > 0.0 {
+        let full = f.area();
+        let buf = f.buffer_mut();
+        for x in full.left()..full.right() {
+            for y in full.top()..full.bottom() {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.bg = blend_color(cell.bg, Color::Rgb(10, 10, 18), dim);
+                }
+            }
+        }
+    }
     match &state.overlay {
         Overlay::AddName { value } => modal(f, 60, 4, " Add Remote ",
-            &format!("Remote name:\n> {}\u{2588}", value), RED),
+            &format!("Remote name:\n> {}\u{2588}", value), RED, slide),
         Overlay::AddUrl { name, value } => modal(f, 70, 4, " Add Remote ",
-            &format!("URL for '{}':\n> {}\u{2588}", name, value), RED),
+            &format!("URL for '{}':\n> {}\u{2588}", name, value), RED, slide),
         Overlay::RenameRemote { old, value } => modal(f, 60, 4, " Rename Remote ",
-            &format!("Rename '{}' to:\n> {}\u{2588}", old, value), RED),
+            &format!("Rename '{}' to:\n> {}\u{2588}", old, value), RED, slide),
         Overlay::RemoveRemote { name } => modal(f, 60, 4, " Remove Remote ",
-            &format!("Remove remote '{}'?\n\n[y] Yes  [n/Esc] Cancel", name), RED),
+            &format!("Remove remote '{}'?\n\n[y] Yes  [n/Esc] Cancel", name), RED, slide),
         Overlay::CreateBranch { step, name, base, remote } => {
             let prompt = match step {
                 0 => format!("Branch name:\n> {}\u{2588}", name),
                 1 => format!("Base (commit/branch):\n> {}\u{2588}", base),
                 _ => format!("Push to remote (empty = local only):\n> {}\u{2588}", remote),
             };
-            modal(f, 65, 4, " Create Branch ", &prompt, RED)
+            modal(f, 65, 4, " Create Branch ", &prompt, RED, slide)
         }
         Overlay::DeleteBranch { name } => modal(f, 60, 4, " Delete Branch ",
-            &format!("Delete local branch '{}'?\n\n[y] Yes  [n/Esc] Cancel", name), RED),
+            &format!("Delete local branch '{}'?\n\n[y] Yes  [n/Esc] Cancel", name), RED, slide),
         Overlay::RenameBranch { old, value } => modal(f, 60, 4, " Rename Branch ",
-            &format!("Rename '{}' to:\n> {}\u{2588}", old, value), RED),
+            &format!("Rename '{}' to:\n> {}\u{2588}", old, value), RED, slide),
         Overlay::Merge { step, src_remote, src_branch, dest_remote, dest_branch } => {
             let prompt = match step {
                 0 => format!("Source remote:\n> {}\u{2588}", src_remote),
@@ -2374,22 +2516,22 @@ fn render_overlay(f: &mut Frame, state: &AppState) {
                 2 => format!("Destination remote:\n> {}\u{2588}", dest_remote),
                 _ => format!("Destination branch:\n> {}\u{2588}", dest_branch),
             };
-            modal(f, 65, 4, " Merge ", &prompt, VIBRANT_PINK)
+            modal(f, 65, 4, " Merge ", &prompt, VIBRANT_PINK, slide)
         }
         Overlay::CommitType { value } => modal(f, 60, 7, " Commit Type ",
-            &format!("Select commit type:\n\n[f] feat  [x] fix  [d] docs  [s] style  [r] refactor\n[T] test  [c] chore  [b] build  [p] perf\n\nOr type to filter:\n> {}\u{2588}", value), GREEN),
+            &format!("Select commit type:\n\n[f] feat  [x] fix  [d] docs  [s] style  [r] refactor\n[T] test  [c] chore  [b] build  [p] perf\n\nOr type to filter:\n> {}\u{2588}", value), GREEN, slide),
         Overlay::CommitMsg { value } => modal(f, 70, 4, " Commit Message ",
-            &format!("Commit subject:\n> {}\u{2588}", value), GREEN),
+            &format!("Commit subject:\n> {}\u{2588}", value), GREEN, slide),
         Overlay::CommitBody { value } => modal(f, 70, 6, " Commit Body ",
-            &format!("Commit body (optional, Enter to skip):\n> {}\u{2588}", value), GREEN),
+            &format!("Commit body (optional, Enter to skip):\n> {}\u{2588}", value), GREEN, slide),
         Overlay::AmendMsg { value } => modal(f, 70, 4, " Amend last commit ",
-            &format!("New message:\n> {}\u{2588}", value), YELLOW),
+            &format!("New message:\n> {}\u{2588}", value), YELLOW, slide),
         Overlay::RevertCommit { value } => modal(f, 60, 4, " Revert commit ",
-            &format!("Commit to revert (sha/ref):\n> {}\u{2588}", value), YELLOW),
+            &format!("Commit to revert (sha/ref):\n> {}\u{2588}", value), YELLOW, slide),
         Overlay::ResetCommit { value, mode } => modal(f, 70, 5, " Reset ",
-            &format!("Mode: [1] soft  [2] mixed  [3] hard   (current: {:?})\nTarget (sha/ref):\n> {}\u{2588}", mode, value), YELLOW),
+            &format!("Mode: [1] soft  [2] mixed  [3] hard   (current: {:?})\nTarget (sha/ref):\n> {}\u{2588}", mode, value), YELLOW, slide),
         Overlay::DiffPath { value, mode } => modal(f, 70, 4, " Diff file ",
-            &format!("Diff ({:?}) for path:\n> {}\u{2588}", mode, value), CYAN),
+            &format!("Diff ({:?}) for path:\n> {}\u{2588}", mode, value), CYAN, slide),
         Overlay::CherryPick { value, context } => {
             let ctx_line = if context.is_empty() {
                 String::new()
@@ -2400,11 +2542,11 @@ fn render_overlay(f: &mut Frame, state: &AppState) {
             let copy = if state.pick_copy { "ON" } else { "off" };
             let push = if state.pick_push { "ON" } else { "off" };
             modal(f, 85, 7, " Cherry-pick commit ",
-                &format!("Commit to cherry-pick (sha/ref):\n> {}\u{2588}{}\ntarget: {}   copy (no-commit): {}   push: {}\n\n[space] cherry-pick  [d] preview diff  [t] target  [c] copy  [p] push  [Enter] accept  [Esc] cancel", value, ctx_line, target, copy, push), VIBRANT_PINK)
+                &format!("Commit to cherry-pick (sha/ref):\n> {}\u{2588}{}\ntarget: {}   copy (no-commit): {}   push: {}\n\n[space] cherry-pick  [d] preview diff  [t] target  [c] copy  [p] push  [Enter] accept  [Esc] cancel", value, ctx_line, target, copy, push), VIBRANT_PINK, slide)
         }
 Overlay::Message { text, is_error } => {
              let color = if *is_error { RED } else { GREEN };
-             modal(f, 70, 4, " Message ", &format!("{}\n\n[Enter/Esc to dismiss]", text), color)
+             modal(f, 70, 4, " Message ", &format!("{}\n\n[Enter/Esc to dismiss]", text), color, slide)
          }
          Overlay::SearchCommit { value } => {
              let prompt = if value.is_empty() {
@@ -2412,7 +2554,7 @@ Overlay::Message { text, is_error } => {
              } else {
                  format!("Search commits by SHA or message:\n> {}\u{2588}", value)
              };
-             modal(f, 70, 5, " Search Commits ", &prompt, CYAN)
+             modal(f, 70, 5, " Search Commits ", &prompt, CYAN, slide)
          }
          Overlay::SearchBranch { value } => {
              let prompt = if value.is_empty() {
@@ -2420,7 +2562,7 @@ Overlay::Message { text, is_error } => {
              } else {
                  format!("Search branches by name:\n> {}\u{2588}", value)
              };
-             modal(f, 70, 5, " Search Branches ", &prompt, CYAN)
+             modal(f, 70, 5, " Search Branches ", &prompt, CYAN, slide)
          }
          Overlay::Help { scroll } => render_help(f, *scroll),
          Overlay::Palette { value, selected, filtered } => render_palette(f, value, *selected, filtered),
@@ -2445,9 +2587,9 @@ Overlay::Message { text, is_error } => {
          Overlay::PickSource { filter, selected } => render_pick_source(f, state, filter, *selected),
          Overlay::PickBrowse { selected } => render_pick_browse(f, state, *selected),
          Overlay::Prompt { title, value, .. } => modal(f, 80, 5, title,
-             &format!("{}\n> {}\u{2588}", prompt_hint(title), value), CYAN),
+             &format!("{}\n> {}\u{2588}", prompt_hint(title), value), CYAN, slide),
          Overlay::ConfirmDangerous { title, prompt, .. } => modal(f, 70, 5, title,
-             &format!("{}\n\n[y] Yes  [n/Esc] Cancel", prompt), RED),
+             &format!("{}\n\n[y] Yes  [n/Esc] Cancel", prompt), RED, slide),
          Overlay::None => {}
     }
 }
@@ -2540,17 +2682,21 @@ fn render_palette(f: &mut Frame, value: &str, selected: usize, _filtered: &Vec<u
 }
 
 /// Dim the whole frame (frosted look) and draw a centered modal on top.
-fn glass_modal(f: &mut Frame, width: u16, height: u16, title: &str, text: String, color: Color) {
+#[allow(clippy::too_many_arguments)]
+fn glass_modal(f: &mut Frame, width: u16, height: u16, title: &str, text: String, color: Color, slide: i16, dim: f64) {
     let full = f.area();
     let buf = f.buffer_mut();
     for x in full.left()..full.right() {
         for y in full.top()..full.bottom() {
             if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.bg = blend_color(cell.bg, Color::Rgb(12, 12, 22), 0.55);
+                cell.bg = blend_color(cell.bg, Color::Rgb(12, 12, 22), dim);
             }
         }
     }
-    let area = centered_rect(width, height, full);
+    let mut area = centered_rect(width, height, full);
+    if slide > 0 {
+        area.y = area.y.saturating_add(slide as u16).min(full.bottom().saturating_sub(1));
+    }
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
@@ -2787,7 +2933,11 @@ fn render_profile(f: &mut Frame, state: &AppState, login: &str, loaded: bool) {
     } else {
         text.push_str("Profile unavailable (is gh installed & authenticated?).");
     }
-    glass_modal(f, 62, 16, &format!(" GitHub Profile — {} ", login), text, GREEN);
+    let t = state.anim_progress(AnimKind::OverlayIn);
+    let fade = ease_out(t);
+    let dim = state.repo.config.animations.dim * (1.0 - fade);
+    let slide = ((1.0 - fade) * 8.0) as i16;
+    glass_modal(f, 62, 16, &format!(" GitHub Profile — {} ", login), text, GREEN, slide, dim);
 }
 
 fn render_prs(f: &mut Frame, state: &AppState, selected: usize, pr_state: &str, filter: &str) {
@@ -2883,7 +3033,11 @@ fn render_pr_detail(f: &mut Frame, state: &AppState, number: u32, tab: PrTab) {
             text.push_str("\n[o] overview   [c] commits   [v] show diff in detail pane   [Esc] close");
         }
     }
-    glass_modal(f, 88, 34, &format!(" Pull Request #{} ", number), text, VIBRANT_PINK);
+    let t = state.anim_progress(AnimKind::OverlayIn);
+    let fade = ease_out(t);
+    let dim = state.repo.config.animations.dim * (1.0 - fade);
+    let slide = ((1.0 - fade) * 8.0) as i16;
+    glass_modal(f, 88, 34, &format!(" Pull Request #{} ", number), text, VIBRANT_PINK, slide, dim);
 }
 
 /// Flatten `remote/branch` sources for the picker, sorted by remote name.
@@ -3111,21 +3265,34 @@ fn hover_text(state: &AppState) -> Option<String> {
     }
 }
 
-fn modal(f: &mut Frame, percent_x: u16, height: u16, title: &str, text: &str, color: Color) {
-    let area = centered_rect(percent_x, height, f.area());
-    let m = Paragraph::new(text)
-        .block(Block::default().title(title).borders(Borders::ALL).border_style(Style::default().fg(color)))
-        .style(Style::default().fg(Color::White));
-    f.render_widget(ratatui::widgets::Clear, area);
-    f.render_widget(m, area);
-}
+ fn modal(f: &mut Frame, percent_x: u16, height: u16, title: &str, text: &str, color: Color, slide: i16) {
+     let mut area = centered_rect(percent_x, height, f.area());
+     if slide > 0 {
+         area.y = area.y.saturating_add(slide as u16).min(f.area().bottom().saturating_sub(1));
+     }
+     let m = Paragraph::new(text)
+         .block(Block::default().title(title).borders(Borders::ALL).border_style(Style::default().fg(color)))
+         .style(Style::default().fg(Color::White));
+     f.render_widget(ratatui::widgets::Clear, area);
+     f.render_widget(m, area);
+ }
 
-fn border_style(focused: bool) -> Style {
-    if focused {
+fn border_style(state: &AppState, pane: Focus) -> Style {
+    let focused = state.focus == pane;
+    let mut s = if focused {
         Style::default().fg(CYAN).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(GRAY)
+    };
+    // Brighten the border while a focus-change or refresh pulse targets this pane.
+    let pulse = state
+        .pulse_level(AnimKind::FocusPulse, pane)
+        .max(state.pulse_level(AnimKind::RefreshFlash, pane));
+    if pulse > 0.0 {
+        let b = (120.0 + 135.0 * pulse) as u8;
+        s = s.fg(Color::Rgb(b, b, 255)).add_modifier(Modifier::BOLD);
     }
+    s
 }
 
 fn build_detail(state: &AppState) -> String {
@@ -4273,6 +4440,7 @@ fn cycle_focus(state: &mut AppState) {
         Focus::Detail => Focus::Graph,
         Focus::Graph => Focus::Remotes,
     };
+    state.push_anim(AnimKind::FocusPulse, Some(state.focus));
     state.refresh();
 }
 
@@ -4284,6 +4452,7 @@ fn cycle_focus_back(state: &mut AppState) {
         Focus::Files => Focus::Branches,
         Focus::Branches => Focus::Remotes,
     };
+    state.push_anim(AnimKind::FocusPulse, Some(state.focus));
     state.refresh();
 }
 
@@ -4477,5 +4646,22 @@ mod tests {
         let raw = "CORP\\jdoe";
         let user = raw.rsplit('\\').next().unwrap_or("unknown");
         assert_eq!(user, "jdoe");
+    }
+
+    #[test]
+    fn ease_out_bounds_and_monotonic() {
+        assert!((ease_out(0.0) - 0.0).abs() < 1e-9);
+        assert!((ease_out(1.0) - 1.0).abs() < 1e-9);
+        assert!(ease_out(0.5) > 0.5); // ease-out accelerates early
+        assert!(ease_out(0.25) < ease_out(0.75));
+    }
+
+    #[test]
+    fn anim_duration_scales_with_speed() {
+        let p = crate::config::AnimationPrefs::default();
+        assert_eq!(anim_duration_ms(&p, AnimKind::OverlayIn), 200);
+        assert_eq!(anim_duration_ms(&p, AnimKind::RefreshFlash), 150);
+        let fast = crate::config::AnimationPrefs { speed: 2.0, ..crate::config::AnimationPrefs::default() };
+        assert_eq!(anim_duration_ms(&fast, AnimKind::FocusPulse), 360);
     }
 }

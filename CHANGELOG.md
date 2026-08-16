@@ -80,6 +80,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   username (`USER`/`USERNAME`/`whoami`, with Windows `DOMAIN\user` trimmed),
   plus the GitHub username. Overridable via `[identity] device` /
   `[identity] username` in the config.
+- Configurable rendering animations via `[animations]`: master `enabled`,
+  global `speed`, overlay fade `dim`, and per-kind toggles + durations
+  (`overlay`/`focus`/`panel`/`refresh`). When enabled, modals fade/slide in,
+  focus changes and pane refreshes pulse the pane border, and Detail panel
+  view switches wipe in; `enabled = false` renders everything instantly.
 
 ### Fixed
 - Auto-save no longer stages everything into the real index (`git add -A` was

@@ -380,6 +380,25 @@ device = "MyPC"      # override the auto-detected host name
 username = "alice"   # override the auto-detected system user
 ```
 
+Rendering animations are configurable via `[animations]` (set `enabled = false`
+for reduced motion; tune the global `speed`, the overlay fade `dim`, and each
+kind's on/off + duration in milliseconds):
+
+```toml
+[animations]
+enabled = true     # master switch — false renders everything instantly
+speed    = 1.0     # duration multiplier (0.5 = half, 2.0 = double)
+dim      = 0.35    # overlay fade dim intensity
+overlay  = true    # modal open (slide + fade)
+overlay_ms = 200
+focus    = true    # focus-change border pulse
+focus_ms = 180
+panel    = true    # Detail panel view transitions (wipe-in)
+panel_ms = 200
+refresh  = true    # pane-refresh border pulse
+refresh_ms = 150
+```
+
 ## License
 
 MIT

@@ -36,6 +36,8 @@ pub struct Config {
     pub gui: GuiPreferences,
     #[serde(default)]
     pub identity: IdentityPreferences,
+    #[serde(default)]
+    pub animations: AnimationPrefs,
 }
 
 /// Optional display-name overrides for the identity shown in the welcome
@@ -46,6 +48,82 @@ pub struct IdentityPreferences {
     pub device: Option<String>,
     /// Override the detected system username.
     pub username: Option<String>,
+}
+
+/// TUI rendering-animation preferences (`[animations]`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnimationPrefs {
+    /// Master switch — when false, every animation renders instantly.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Global duration multiplier (0.5 = half, 2.0 = double).
+    #[serde(default = "default_speed")]
+    pub speed: f64,
+    /// Max background-dim intensity for the overlay fade.
+    #[serde(default = "default_dim")]
+    pub dim: f64,
+    /// Modal open animation (slide + fade).
+    #[serde(default = "default_true")]
+    pub overlay: bool,
+    #[serde(default = "default_overlay_ms")]
+    pub overlay_ms: u64,
+    /// Focus-change border pulse.
+    #[serde(default = "default_true")]
+    pub focus: bool,
+    #[serde(default = "default_focus_ms")]
+    pub focus_ms: u64,
+    /// Detail panel view transitions (wipe-in).
+    #[serde(default = "default_true")]
+    pub panel: bool,
+    #[serde(default = "default_panel_ms")]
+    pub panel_ms: u64,
+    /// Pane-refresh border pulse.
+    #[serde(default = "default_true")]
+    pub refresh: bool,
+    #[serde(default = "default_refresh_ms")]
+    pub refresh_ms: u64,
+}
+
+impl Default for AnimationPrefs {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            speed: 1.0,
+            dim: 0.35,
+            overlay: true,
+            overlay_ms: 200,
+            focus: true,
+            focus_ms: 180,
+            panel: true,
+            panel_ms: 200,
+            refresh: true,
+            refresh_ms: 150,
+        }
+    }
+}
+
+fn default_speed() -> f64 {
+    1.0
+}
+
+fn default_dim() -> f64 {
+    0.35
+}
+
+fn default_overlay_ms() -> u64 {
+    200
+}
+
+fn default_focus_ms() -> u64 {
+    180
+}
+
+fn default_panel_ms() -> u64 {
+    200
+}
+
+fn default_refresh_ms() -> u64 {
+    150
 }
 
 /// GUI behaviour preferences (idle tips, previews, GitHub integration).
@@ -350,5 +428,15 @@ mod tests {
         let parsed: Config = toml::from_str("[identity]\ndevice = \"MyPC\"\nusername = \"alice\"\n").unwrap();
         assert_eq!(parsed.identity.device.as_deref(), Some("MyPC"));
         assert_eq!(parsed.identity.username.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn animation_prefs_partial_table_falls_back() {
+        let cfg: Config = toml::from_str("[animations]\nenabled = false\noverlay_ms = 350\n").unwrap();
+        let a = &cfg.animations;
+        assert!(!a.enabled);
+        assert_eq!(a.overlay_ms, 350);
+        assert_eq!(a.focus_ms, 180); // default
+        assert!((a.speed - 1.0).abs() < 1e-9);
     }
 }

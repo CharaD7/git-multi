@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-16
+
 ### Added
 - Auto-save safety snapshots in the TUI: after ~30s idle, the current dirty state is
   committed to `refs/gitmulti/autosave` so an accidental destructive operation
@@ -155,5 +157,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   assets on GitHub tag push.
 - Detailed installation instructions per package type in `INSTALL.md`.
 
-[Unreleased]: https://github.com/CharaD7/git-multi/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/CharaD7/git-multi/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/CharaD7/git-multi/releases/tag/v0.3.0
 [0.2.2]: https://github.com/CharaD7/git-multi/releases/tag/v0.2.2
